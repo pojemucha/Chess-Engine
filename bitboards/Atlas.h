@@ -128,32 +128,28 @@ namespace MyChess {
                 // OCCUPANCY MASKS
                 Square rank = cell / 8;
                 Square file = cell % 8;
-                // ROOK OCCUPANCY MASKS
-                for (Square i = rank + 1; i < 7; ++i)                      
+                // ROOK OCCUPANCY MASKS - Include all squares up to board edges
+                for (int i = (int)rank + 1; i < 8; ++i)                      
                     rook_occupancy_masks[cell] |= (1ULL << (i * 8 + file));    // UP
-                for (Square i = 1; i < rank; ++i)                          
+                for (int i = (int)rank - 1; i >= 0; --i)                          
                     rook_occupancy_masks[cell] |= (1ULL << (i * 8 + file));    // DOWN
-                for (Square i = file + 1; i < 7; ++i)                      
+                for (int i = (int)file + 1; i < 8; ++i)                      
                     rook_occupancy_masks[cell] |= (1ULL << (rank * 8 + i));    // RIGHT
-                for (Square i = 1; i < file; ++i)                          
+                for (int i = (int)file - 1; i >= 0; --i)                          
                     rook_occupancy_masks[cell] |= (1ULL << (rank * 8 + i));    // LEFT
-                // BISHOP OCCUPANCY MASKS
-                for (Square r = rank + 1, f = file + 1; r < 7 && f < 7; ++r, ++f)
-                    bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));     // RIGHT, UP
-                if (file > 0) {
-                    for (Square r = rank + 1, f = file - 1; r < 7 && f > 1; ++r, --f)
-                        bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));     // LEFT, UP
-                }
-
-                if (rank > 0) {
-                    for (Square r = rank - 1, f = file + 1; r > 1 && f < 7; --r, ++f)
-                        bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));     // RIGHT, DOWN
-                }
-
-                if (rank > 0 && file > 0) {
-                    for (Square r = rank - 1, f = file - 1; r > 1 && f > 1; --r, --f)
-                        bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));     // LEFT, DOWN
-                }
+                // BISHOP OCCUPANCY MASKS - Include all squares for complete coverage
+                // Upper-right diagonal
+                for (int r = (int)rank + 1, f = (int)file + 1; r < 8 && f < 8; ++r, ++f)
+                    bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));
+                // Upper-left diagonal  
+                for (int r = (int)rank + 1, f = (int)file - 1; r < 8 && f >= 0; ++r, --f)
+                    bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));
+                // Lower-right diagonal
+                for (int r = (int)rank - 1, f = (int)file + 1; r >= 0 && f < 8; --r, ++f)
+                    bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));
+                // Lower-left diagonal
+                for (int r = (int)rank - 1, f = (int)file - 1; r >= 0 && f >= 0; --r, --f)
+                    bishop_occupancy_masks[cell] |= (1ULL << (r * 8 + f));
                 // ROOK SHIFTS
                 rook_shifts[cell] = (64 - Math::count_bits(rook_occupancy_masks[cell]));
                 // BISHOP SHIFTS

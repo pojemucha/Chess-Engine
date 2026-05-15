@@ -5,7 +5,7 @@
 #include <cmath>
 #include <chrono>
 
-#include "../data/EvalWeights.h"
+#include "EvalWeights.h"
 #include "Atlas.h"
 
 using Move = std::uint16_t;
@@ -239,7 +239,7 @@ namespace MyChess {
                         Piece to_piece   = piece_on_square[to];
                         short victim_value   = std::abs(weight[to_piece]);
                         short attacker_value = std::abs(weight[from_piece]);
-                        short move_score     = (victim_value * 100) - (attacker_value / 10);
+                        short move_score     = (victim_value * 10) - (attacker_value / 10);
                         list.add(encode_move(from, to, QUEEN_PROMOTION_AND_CAPTURE), move_score + weight[WHITE_QUEEN]);
                         list.add(encode_move(from, to, KNIGHT_PROMOTION_AND_CAPTURE), move_score + weight[WHITE_KNIGHT] * 2);
                         list.add(encode_move(from, to, ROOK_PROMOTION_AND_CAPTURE), move_score + weight[WHITE_ROOK]);
@@ -255,7 +255,7 @@ namespace MyChess {
                 Piece to_piece   = piece_on_square[to];
                 short victim_value   = std::abs(weight[to_piece]);
                 short attacker_value = std::abs(weight[from_piece]);
-                short move_score     = (victim_value * 100) - (attacker_value / 10);
+                short move_score     = (victim_value * 10) - (attacker_value / 10);
                 list.add(encode_move(from, to, flag), (flag == CAPTURE) ? move_score : 0);
             }
         }
@@ -603,7 +603,7 @@ namespace MyChess {
                 Piece to_piece   = piece_on_square[to];
                 short victim_value   = std::abs(weight[to_piece]);
                 short attacker_value = std::abs(weight[from_piece]);
-                short move_score     = (victim_value * 100) - (attacker_value / 10);
+                short move_score     = (victim_value * 10) - (attacker_value / 10);
                 list.add(encode_move(from, to, CAPTURE), move_score);
                 board &= (board - 1);
             }
@@ -764,7 +764,7 @@ namespace MyChess {
                             Piece to_piece   = piece_on_square[(en_passant_square ^ 8)];
                             short victim_value   = std::abs(weight[to_piece]);
                             short attacker_value = std::abs(weight[from_piece]);
-                            short move_score     = (victim_value * 100) - (attacker_value / 10);
+                            short move_score     = (victim_value * 10) - (attacker_value / 10);
                             list.add(encode_move(from, en_passant_square, EN_PASSANT), move_score);
                         }
                     }

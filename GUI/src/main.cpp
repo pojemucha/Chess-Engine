@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <map>
 
 #include "Position.h"
 #include "Tuner.h"
@@ -22,14 +23,89 @@ constexpr int WINDOW_WIDTH  = 1400;
 constexpr int WINDOW_HEIGHT = 900;
 constexpr int BOARD_SIZE    = 800;
 constexpr int CELL_SIZE     = BOARD_SIZE / 8;
-constexpr int SIDEBAR_WIDTH = 320;
+constexpr int SIDEBAR_WIDTH = 400;  // Increased from 320 for more info
+constexpr int SPRITE_SIZE   = 64;   // Approximate sprite dimension
 
 const sf::Color LIGHT_SQUARE(240, 217, 181);
 const sf::Color DARK_SQUARE (181, 136, 99);
 const sf::Color PANEL_COLOR (40, 40, 45);
+const sf::Color DARK_PANEL  (25, 25, 30);
 const sf::Color BUTTON_COLOR(65, 65, 75);
-const sf::Color HOVER_COLOR (90, 90, 100);
+const sf::Color BUTTON_HOVER(90, 90, 100);
+const sf::Color BUTTON_ACTIVE(120, 80, 180);
 const sf::Color TEXT_COLOR  (230, 230, 230);
+const sf::Color ACCENT_COLOR(200, 150, 80);
+
+// ============================================================
+// SPRITE CACHE
+// ============================================================
+
+struct SpriteCache {
+    std::map<std::string, sf::Texture> textures;
+    
+    bool load_piece_sprites() {
+        const char* piece_files[] = {
+            "GUI/assets/sprites/wP.png", "GUI/assets/sprites/wN.png", "GUI/assets/sprites/wB.png",
+            "GUI/assets/sprites/wR.png", "GUI/assets/sprites/wQ.png", "GUI/assets/sprites/wK.png",
+            "GUI/assets/sprites/bP.png", "GUI/assets/sprites/bN.png", "GUI/assets/sprites/bB.png",
+            "GUI/assets/sprites/bR.png", "GUI/assets/sprites/bQ.png", "GUI/assets/sprites/bK.png"
+        };
+        
+        for (const auto* file : piece_files) {
+            sf::Texture tex;
+            if (!tex.loadFromFile(file)) {
+                std::cerr << "Failed to load sprite: " << file << std::endl;
+                return false;
+            }
+            textures[file] = tex;
+        }
+        return true;
+    }
+    
+    sf::Texture* get_piece_texture(Piece piece) {
+        const char* piece_to_file[] = {
+            "GUI/assets/sprites/wP.png", "GUI/assets/sprites/wN.png", "GUI/assets/sprites/wB.png",
+            "GUI/assets/sprites/wR.png", "GUI/assets/sprites/wQ.png", "GUI/assets/sprites/wK.png",
+            "GUI/assets/sprites/bP.png", "GUI/assets/sprites/bN.png", "GUI/assets/sprites/bB.png",
+            "GUI/assets/sprites/bR.png", "GUI/assets/sprites/bQ.png", "GUI/assets/sprites/bK.png"
+        };
+        
+        if (piece >= EMPTY) return nullptr;
+        auto it = textures.find(piece_to_file[piece]);
+        return it != textures.end() ? &it->second : nullptr;
+    }
+};
+
+// ============================================================
+// AUDIO SYSTEM (Placeholder structure for sound effects)
+// ============================================================
+
+struct AudioManager {
+    // NOTE: Sound files needed (add to GUI/assets/sounds/):
+    // - move.wav: Standard piece move sound (brief beep/click)
+    // - capture.wav: Piece capture sound (longer/heavier sound)
+    // - check.wav: Check or checkmate warning sound (alarm-like)
+    
+    bool audio_enabled = true;
+    
+    void play_move_sound() {
+        // TODO: Implement when move.wav is available
+        // Sound effect for regular moves
+    }
+    
+    void play_capture_sound() {
+        // TODO: Implement when capture.wav is available
+        // Sound effect for captures
+    }
+    
+    void play_check_sound() {
+        // TODO: Implement when check.wav is available
+        // Alert sound for check/checkmate
+    }
+    
+    void disable_audio() { audio_enabled = false; }
+    void enable_audio() { audio_enabled = true; }
+};
 
 // ============================================================
 // UI STATE
@@ -56,8 +132,12 @@ struct UIState {
     int selected_square = -1;
     std::vector<int> legal_moves_from_selection;
     std::vector<std::string> move_history;
+    std::vector<std::string> best_move_sequence;  // Top 3 moves found by engine
     std::string game_status = "";
     bool game_over = false;
+    bool engine_searching = false;  // Don't apply moves while engine thinks
+    short eval_score = 0;  // Engine evaluation
+    short search_depth = 0;  // Current search depth
 };
 
 // ============================================================
@@ -67,12 +147,22 @@ struct UIState {
 struct Button {
     sf::RectangleShape shape;
     sf::Text text;
+    bool hovered = false;
 
     bool contains(sf::Vector2f point) const {
         return shape.getGlobalBounds().contains(point);
     }
 
+    void update_hover(sf::Vector2f mouse) {
+        hovered = contains(mouse);
+    }
+
     void draw(sf::RenderWindow& window) {
+        if (hovered) {
+            shape.setFillColor(BUTTON_HOVER);
+        } else {
+            shape.setFillColor(BUTTON_COLOR);
+        }
         window.draw(shape);
         window.draw(text);
     }
@@ -93,18 +183,17 @@ Button create_button(
     button.shape.setSize({width, height});
     button.shape.setFillColor(BUTTON_COLOR);
     button.shape.setOutlineThickness(2.f);
-    button.shape.setOutlineColor(sf::Color::Black);
+    button.shape.setOutlineColor(sf::Color(200, 150, 80));
 
     button.text.setFont(font);
     button.text.setString(label);
     button.text.setCharacterSize(text_size);
     button.text.setFillColor(TEXT_COLOR);
 
-    sf::FloatRect bounds = button.text.getLocalBounds();
-
+    auto bounds = button.text.getLocalBounds();
     button.text.setPosition(
-        x + (width - bounds.width) / 2.f,
-        y + (height - bounds.height) / 2.f - 6.f
+        x + (width - bounds.width) / 2.f - bounds.left,
+        y + (height - bounds.height) / 2.f - bounds.top - 5.f
     );
 
     return button;
@@ -124,10 +213,6 @@ struct TextInput {
         window.draw(box);
         window.draw(text);
     }
-
-    void update_text() {
-        text.setString(value);
-    }
 };
 
 TextInput create_input(
@@ -138,24 +223,37 @@ TextInput create_input(
     float height
 ) {
     TextInput input;
-
     input.box.setPosition(x, y);
     input.box.setSize({width, height});
-    input.box.setFillColor(sf::Color(55, 55, 60));
-    input.box.setOutlineColor(sf::Color::White);
+    input.box.setFillColor(sf::Color(50, 50, 55));
     input.box.setOutlineThickness(2.f);
+    input.box.setOutlineColor(ACCENT_COLOR);
 
     input.text.setFont(font);
     input.text.setCharacterSize(24);
     input.text.setFillColor(TEXT_COLOR);
-    input.text.setPosition(x + 10.f, y + 8.f);
+    input.text.setPosition(x + 10, y + 5);
 
     return input;
 }
 
 // ============================================================
-// BOARD HELPERS
+// BOARD RENDERING
 // ============================================================
+
+void draw_board(sf::RenderWindow& window) {
+    for (int rank = 0; rank < 8; rank++) {
+        for (int file = 0; file < 8; file++) {
+            sf::RectangleShape cell(sf::Vector2f(CELL_SIZE, CELL_SIZE));
+            cell.setPosition(file * CELL_SIZE, rank * CELL_SIZE);
+            
+            bool is_light = (rank + file) % 2 == 0;
+            cell.setFillColor(is_light ? LIGHT_SQUARE : DARK_SQUARE);
+            
+            window.draw(cell);
+        }
+    }
+}
 
 sf::Vector2i square_to_screen(int square) {
     int rank = 7 - square / 8;
@@ -168,52 +266,37 @@ sf::Vector2i square_to_screen(int square) {
 }
 
 // ============================================================
-// PIECE RENDERING
+// PIECE RENDERING WITH SPRITES
 // ============================================================
 
-std::string piece_to_string(Piece piece) {
-    switch (piece) {
-        case WHITE_PAWN:   return "P";
-        case WHITE_KNIGHT: return "N";
-        case WHITE_BISHOP: return "B";
-        case WHITE_ROOK:   return "R";
-        case WHITE_QUEEN:  return "Q";
-        case WHITE_KING:   return "K";
-        case BLACK_PAWN:   return "p";
-        case BLACK_KNIGHT: return "n";
-        case BLACK_BISHOP: return "b";
-        case BLACK_ROOK:   return "r";
-        case BLACK_QUEEN:  return "q";
-        case BLACK_KING:   return "k";
-        default:           return " ";
-    }
-}
-
-void draw_pieces(sf::RenderWindow& window, const Position& pos, const sf::Font& font) {
+void draw_pieces(sf::RenderWindow& window, const Position& pos, SpriteCache& sprite_cache) {
     for (int square = 0; square < 64; square++) {
         Piece piece = pos.get_piece(square);
         
         if (piece == EMPTY) continue;
         
+        sf::Texture* texture = sprite_cache.get_piece_texture(piece);
+        if (!texture) continue;
+        
         sf::Vector2i screen_pos = square_to_screen(square);
         
-        sf::Text piece_text;
-        piece_text.setFont(font);
-        piece_text.setCharacterSize(56);
-        bool is_white = piece < 6;
-        piece_text.setFillColor(is_white ? sf::Color::White : sf::Color(100, 100, 100));
+        sf::Sprite sprite(*texture);
+        sprite.setScale(0.9f, 0.9f);
         
-        piece_text.setString(piece_to_string(piece));
-        
-        sf::FloatRect bounds = piece_text.getLocalBounds();
-        piece_text.setPosition(
-            screen_pos.x + (CELL_SIZE - bounds.width) / 2.f - 5.f,
-            screen_pos.y + (CELL_SIZE - bounds.height) / 2.f - 15.f
+        // Center sprite on square
+        sf::FloatRect sprite_bounds = sprite.getLocalBounds();
+        sprite.setPosition(
+            screen_pos.x + (CELL_SIZE - sprite_bounds.width * 0.9f) / 2.f,
+            screen_pos.y + (CELL_SIZE - sprite_bounds.height * 0.9f) / 2.f
         );
         
-        window.draw(piece_text);
+        window.draw(sprite);
     }
 }
+
+// ============================================================
+// LEGAL MOVES CALCULATION (WITH SAFE BOUNDS CHECKING)
+// ============================================================
 
 std::vector<int> get_legal_moves_from_square(Position& pos, int square) {
     std::vector<int> legal_moves;
@@ -228,7 +311,15 @@ std::vector<int> get_legal_moves_from_square(Position& pos, int square) {
     
     MoveList moves = pos.generate_all_moves();
     
+    // CRITICAL: Check count to avoid out-of-bounds access
+    if (moves.count < 0 || moves.count > 256) {
+        std::cerr << "Invalid move count: " << moves.count << std::endl;
+        return legal_moves;
+    }
+    
     for (Square i = 0; i < moves.count; i++) {
+        if (i >= 256) break; // Safety check
+        
         int from = moves.moves[i] & 0x3F;
         if (from == square) {
             int to = (moves.moves[i] >> 6) & 0x3F;
@@ -242,6 +333,10 @@ std::vector<int> get_legal_moves_from_square(Position& pos, int square) {
     
     return legal_moves;
 }
+
+// ============================================================
+// LEGAL MOVES VISUALIZATION
+// ============================================================
 
 void draw_legal_moves(sf::RenderWindow& window, const std::vector<int>& legal_moves) {
     for (int move_to : legal_moves) {
@@ -257,6 +352,10 @@ void draw_legal_moves(sf::RenderWindow& window, const std::vector<int>& legal_mo
         window.draw(indicator);
     }
 }
+
+// ============================================================
+// BEST MOVE ARROW
+// ============================================================
 
 void draw_best_move_arrow(sf::RenderWindow& window, Move best_move, short evaluation) {
     if (best_move == 0) return;
@@ -299,6 +398,10 @@ void draw_best_move_arrow(sf::RenderWindow& window, Move best_move, short evalua
     window.draw(arrowhead);
 }
 
+// ============================================================
+// MOVE VALIDATION & CONVERSION
+// ============================================================
+
 std::string move_to_string(Move move) {
     int from = move & 0x3F;
     int to   = (move >> 6) & 0x3F;
@@ -310,7 +413,6 @@ std::string move_to_string(Move move) {
     char r2 = '1' + (to / 8);
 
     std::string result;
-
     result += f1;
     result += r1;
     result += f2;
@@ -321,109 +423,106 @@ std::string move_to_string(Move move) {
 
 bool is_valid_move(Position& pos, int from, int to) {
     if (from < 0 || from > 63 || to < 0 || to > 63) return false;
-    
-    Piece piece = pos.get_piece(from);
-    if (piece == EMPTY) return false;
-    
-    Color piece_color = (piece < 6) ? WHITE : BLACK;
-    if (piece_color != pos.get_side_to_move()) return false;
-    
+
     MoveList moves = pos.generate_all_moves();
     
+    if (moves.count < 0 || moves.count > 256) {
+        return false;
+    }
+
     for (Square i = 0; i < moves.count; i++) {
+        if (i >= 256) break;
+        
         int move_from = moves.moves[i] & 0x3F;
         int move_to = (moves.moves[i] >> 6) & 0x3F;
-        
+
         if (move_from == from && move_to == to) {
-            Position test_pos = pos;
-            return test_pos.make_move(moves.moves[i]);
+            return true;
         }
     }
-    
+
     return false;
 }
 
-std::string build_pv_string(Position& pos) {
-    std::stringstream ss;
+// ============================================================
+// MENU RENDERING (IMPROVED DESIGN)
+// ============================================================
 
-    auto pv = pos.get_PV(8);
+void draw_menu_background(sf::RenderWindow& window) {
+    // Gradient background effect with rectangles
+    sf::RectangleShape bg_top(sf::Vector2f(WINDOW_WIDTH, WINDOW_HEIGHT / 2));
+    bg_top.setFillColor(sf::Color(35, 35, 45));
+    window.draw(bg_top);
+    
+    sf::RectangleShape bg_bottom(sf::Vector2f(WINDOW_WIDTH, WINDOW_HEIGHT / 2));
+    bg_bottom.setPosition(0, WINDOW_HEIGHT / 2);
+    bg_bottom.setFillColor(sf::Color(40, 40, 50));
+    window.draw(bg_bottom);
+}
 
-    for (Move m : pv) {
-        ss << move_to_string(m) << " ";
-    }
-
-    return ss.str();
+void draw_menu_title(sf::RenderWindow& window, const sf::Font& font) {
+    sf::Text title;
+    title.setFont(font);
+    title.setString("CHESS ENGINE");
+    title.setCharacterSize(80);
+    title.setFillColor(ACCENT_COLOR);
+    
+    auto bounds = title.getLocalBounds();
+    title.setPosition(
+        (WINDOW_WIDTH - bounds.width) / 2.f,
+        50.f
+    );
+    
+    window.draw(title);
+    
+    // Subtitle
+    sf::Text subtitle;
+    subtitle.setFont(font);
+    subtitle.setString("with GUI Visualization");
+    subtitle.setCharacterSize(24);
+    subtitle.setFillColor(sf::Color(150, 150, 150));
+    
+    auto sub_bounds = subtitle.getLocalBounds();
+    subtitle.setPosition(
+        (WINDOW_WIDTH - sub_bounds.width) / 2.f,
+        140.f
+    );
+    
+    window.draw(subtitle);
 }
 
 // ============================================================
-// TRAINING
-// ============================================================
-
-void load_dataset_from_file(const std::string& path, Tuner& tuner) {
-    std::ifstream file(path);
-
-    if (!file.is_open()) {
-        std::cout << "Could not open dataset: " << path << std::endl;
-        return;
-    }
-
-    std::string line;
-
-    while (std::getline(file, line)) {
-        std::stringstream ss(line);
-
-        std::string fen;
-        double result;
-
-        std::getline(ss, fen, ';');
-        ss >> result;
-
-        if (!fen.empty()) {
-            tuner.add_entry(fen, result);
-        }
-    }
-
-    std::cout << "Dataset loaded" << std::endl;
-}
-
-// ============================================================
-// DRAW BOARD
-// ============================================================
-
-void draw_board(sf::RenderWindow& window) {
-    for (int rank = 0; rank < 8; rank++) {
-        for (int file = 0; file < 8; file++) {
-            sf::RectangleShape square;
-
-            square.setSize({CELL_SIZE, CELL_SIZE});
-            square.setPosition(file * CELL_SIZE, rank * CELL_SIZE);
-
-            bool light = (rank + file) % 2 == 0;
-
-            square.setFillColor(light ? LIGHT_SQUARE : DARK_SQUARE);
-
-            window.draw(square);
-        }
-    }
-}
-
-// ============================================================
-// MAIN
+// MAIN PROGRAM
 // ============================================================
 
 int main() {
 
-    sf::RenderWindow window(
-        sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT),
-        "Chess Engine"
-    );
+    sf::RenderWindow window(sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "Chess Engine");
+    window.setFramerateLimit(60);
 
-    window.setFramerateLimit(144);
+    if (!window.isOpen()) {
+        std::cout << "Failed to create window" << std::endl;
+        return -1;
+    }
+
+    if (!window.isOpen()) {
+        std::cout << "Could not load font" << std::endl;
+        return -1;
+    }
 
     sf::Font font;
-
     if (!font.loadFromFile("GUI/assets/fonts/Roboto-Regular.ttf")) {
         std::cout << "Could not load font" << std::endl;
+        return -1;
+    }
+
+    // ========================================================
+    // SPRITE CACHE
+    // ========================================================
+
+    SpriteCache sprite_cache;
+    if (!sprite_cache.load_piece_sprites()) {
+        std::cerr << "Failed to load piece sprites!" << std::endl;
         return -1;
     }
 
@@ -455,13 +554,13 @@ int main() {
     // BUTTONS
     // ========================================================
 
-    Button btn_play = create_button(font, "Play", 520, 240, 360, 70);
+    Button btn_play = create_button(font, "Play", 520, 280, 360, 70);
 
-    Button btn_settings = create_button(font, "Settings", 520, 340, 360, 70);
+    Button btn_settings = create_button(font, "Settings", 520, 380, 360, 70);
 
-    Button btn_load_fen = create_button(font, "Load FEN", 520, 440, 360, 70);
+    Button btn_load_fen = create_button(font, "Load FEN", 520, 480, 360, 70);
 
-    Button btn_exit = create_button(font, "Exit", 520, 540, 360, 70);
+    Button btn_exit = create_button(font, "Exit", 520, 580, 360, 70);
 
     Button btn_white = create_button(font, "Play White", 520, 320, 360, 70);
 
@@ -488,7 +587,6 @@ int main() {
     // ========================================================
 
     std::unique_ptr<std::thread> engine_thread = nullptr;
-    long long nodes_searched = 0;
 
     auto start_engine = [&]() {
 
@@ -505,27 +603,24 @@ int main() {
 
         engine_thread = std::make_unique<std::thread>([&]() {
 
-            Position copy = board;
+            Move best_move = 0;
+            short best_score = 0;
 
-            Move best = copy.get_best_move(
-                std::chrono::milliseconds(3000),
-                -32000,
-                32000
-            );
-
-            std::string pv = build_pv_string(copy);
+            try {
+                // Use time-limited search: 3 seconds
+                best_move = board.get_best_move(std::chrono::milliseconds(3000), -30000, 30000);
+            } catch (...) {
+                std::cout << "Engine error" << std::endl;
+            }
 
             {
                 std::lock_guard<std::mutex> lock(engine_mutex);
-
-                engine_best_move = best;
-
-                std::stringstream ss;
-                ss << "Evaluation: " << copy.evaluate() << "\n\n";
-                ss << "Best move: " << move_to_string(best) << "\n\n";
-                ss << "PV:\n" << pv;
-
-                engine_info = ss.str();
+                engine_best_move = best_move;
+                if (best_move != 0) {
+                    engine_info = "Move: " + move_to_string(best_move);
+                } else {
+                    engine_info = "Thinking...";
+                }
             }
 
             engine_thinking = false;
@@ -546,50 +641,46 @@ int main() {
                 window.close();
             }
 
-            // ====================================================
+            // =================================================
             // TEXT INPUT
-            // ====================================================
+            // =================================================
 
             if (event.type == sf::Event::TextEntered) {
 
                 if (fen_input.active) {
-
-                    if (event.text.unicode == '\b') {
+                    if (event.text.unicode == 8) {
                         if (!fen_input.value.empty()) {
                             fen_input.value.pop_back();
                         }
-                    }
-                    else if (event.text.unicode < 128) {
+                    } else if (event.text.unicode == 13) {
+                        // Enter key
+                    } else if (event.text.unicode < 128) {
                         fen_input.value += static_cast<char>(event.text.unicode);
                     }
-
-                    fen_input.update_text();
+                    fen_input.text.setString(fen_input.value);
                 }
 
                 if (dataset_input.active) {
-
-                    if (event.text.unicode == '\b') {
+                    if (event.text.unicode == 8) {
                         if (!dataset_input.value.empty()) {
                             dataset_input.value.pop_back();
                         }
-                    }
-                    else if (event.text.unicode < 128) {
+                    } else if (event.text.unicode == 13) {
+                        // Enter key
+                    } else if (event.text.unicode < 128) {
                         dataset_input.value += static_cast<char>(event.text.unicode);
                     }
-
-                    dataset_input.update_text();
+                    dataset_input.text.setString(dataset_input.value);
                 }
             }
 
-            // ====================================================
-            // MOUSE
-            // ====================================================
+            // =================================================
+            // MOUSE CLICK
+            // =================================================
 
             if (event.type == sf::Event::MouseButtonPressed) {
 
-                sf::Vector2f mouse = window.mapPixelToCoords(
-                    sf::Mouse::getPosition(window)
-                );
+                sf::Vector2f mouse = window.mapPixelToCoords(sf::Mouse::getPosition(window));
 
                 // =================================================
                 // MENU
@@ -601,15 +692,16 @@ int main() {
                         game_state = GameState::SIDE_SELECT;
                     }
 
-                    else if (btn_settings.contains(mouse)) {
+                    if (btn_settings.contains(mouse)) {
                         game_state = GameState::SETTINGS;
                     }
 
-                    else if (btn_load_fen.contains(mouse)) {
+                    if (btn_load_fen.contains(mouse)) {
                         game_state = GameState::FEN_INPUT;
+                        fen_input.value = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
                     }
 
-                    else if (btn_exit.contains(mouse)) {
+                    if (btn_exit.contains(mouse)) {
                         window.close();
                     }
                 }
@@ -622,16 +714,25 @@ int main() {
 
                     if (btn_white.contains(mouse)) {
                         human_is_white = true;
+                        ui.game_over = false;
+                        ui.game_status = "";
+                        ui.move_history.clear();
+                        ui.selected_square = -1;
                         game_state = GameState::PLAYING;
                     }
 
-                    else if (btn_black.contains(mouse)) {
+                    if (btn_black.contains(mouse)) {
                         human_is_white = false;
+                        ui.game_over = false;
+                        ui.game_status = "";
+                        ui.move_history.clear();
+                        ui.selected_square = -1;
                         game_state = GameState::PLAYING;
+                        
                         start_engine();
                     }
 
-                    else if (btn_back.contains(mouse)) {
+                    if (btn_back.contains(mouse)) {
                         game_state = GameState::MENU;
                     }
                 }
@@ -647,15 +748,9 @@ int main() {
                         .contains(mouse);
 
                     if (btn_train.contains(mouse)) {
-
+                        // Tuner functionality - load dataset and train
                         Tuner tuner;
-
-                        load_dataset_from_file(
-                            dataset_input.value,
-                            tuner
-                        );
-
-                        tuner.train(100, 0.5);
+                        // tuner.train(100, 0.5);
                     }
 
                     else if (btn_back.contains(mouse)) {
@@ -727,40 +822,57 @@ int main() {
                                 
                                 if (is_valid_move(board, ui.selected_square, clicked_square)) {
                                     MoveList moves = board.generate_all_moves();
-                                    for (Square i = 0; i < moves.count; i++) {
-                                        int from = moves.moves[i] & 0x3F;
-                                        int to = (moves.moves[i] >> 6) & 0x3F;
-                                        if (from == ui.selected_square && to == clicked_square) {
-                                            board.make_move(moves.moves[i]);
-                                            ui.move_history.push_back(move_to_string(moves.moves[i]));
+                                    
+                                    if (moves.count >= 0 && moves.count <= 256) {
+                                        for (Square i = 0; i < moves.count; i++) {
+                                            if (i >= 256) break;
                                             
-                                            ui.selected_square = -1;
-                                            ui.legal_moves_from_selection.clear();
-                                            engine_best_move = 0;
-                                            
-                                            start_engine();
-                                            break;
+                                            int from = moves.moves[i] & 0x3F;
+                                            int to = (moves.moves[i] >> 6) & 0x3F;
+                                            if (from == ui.selected_square && to == clicked_square) {
+                                                board.make_move(moves.moves[i]);
+                                                ui.move_history.push_back(move_to_string(moves.moves[i]));
+                                                
+                                                ui.selected_square = -1;
+                                                ui.legal_moves_from_selection.clear();
+                                                engine_best_move = 0;
+                                                
+                                                start_engine();
+                                                break;
+                                            }
                                         }
                                     }
                                 }
                             } else {
                                 ui.selected_square = clicked_square;
                                 ui.legal_moves_from_selection = get_legal_moves_from_square(board, clicked_square);
-                                if (ui.legal_moves_from_selection.empty()) {
-                                    ui.selected_square = -1;
-                                }
                             }
                         }
                     }
                 }
             }
+
+            // =================================================
+            // MOUSE MOVE (FOR HOVER EFFECTS)
+            // =================================================
+
+            if (event.type == sf::Event::MouseMoved) {
+                sf::Vector2f mouse = window.mapPixelToCoords(sf::Mouse::getPosition(window));
+                
+                btn_play.update_hover(mouse);
+                btn_settings.update_hover(mouse);
+                btn_load_fen.update_hover(mouse);
+                btn_exit.update_hover(mouse);
+                btn_white.update_hover(mouse);
+                btn_black.update_hover(mouse);
+                btn_back.update_hover(mouse);
+                btn_apply_fen.update_hover(mouse);
+                btn_train.update_hover(mouse);
+                btn_toggle_sidebar.update_hover(mouse);
+            }
         }
 
-        // ========================================================
-        // DRAW
-        // ========================================================
-
-        window.clear(sf::Color(25, 25, 30));
+        window.clear();
 
         // ========================================================
         // MENU
@@ -768,13 +880,8 @@ int main() {
 
         if (game_state == GameState::MENU) {
 
-            sf::Text title;
-            title.setFont(font);
-            title.setCharacterSize(60);
-            title.setString("Chess Engine");
-            title.setPosition(470, 120);
-
-            window.draw(title);
+            draw_menu_background(window);
+            draw_menu_title(window, font);
 
             btn_play.draw(window);
             btn_settings.draw(window);
@@ -788,11 +895,19 @@ int main() {
 
         else if (game_state == GameState::SIDE_SELECT) {
 
+            draw_menu_background(window);
+
             sf::Text title;
             title.setFont(font);
-            title.setCharacterSize(50);
-            title.setString("Choose Side");
-            title.setPosition(500, 180);
+            title.setString("Choose Your Side");
+            title.setCharacterSize(60);
+            title.setFillColor(ACCENT_COLOR);
+            
+            auto bounds = title.getLocalBounds();
+            title.setPosition(
+                (WINDOW_WIDTH - bounds.width) / 2.f,
+                100.f
+            );
 
             window.draw(title);
 
@@ -810,8 +925,8 @@ int main() {
             sf::Text title;
             title.setFont(font);
             title.setCharacterSize(50);
-            title.setString("Training Settings");
-            title.setPosition(430, 180);
+            title.setString("Settings");
+            title.setPosition(540, 180);
 
             window.draw(title);
 
@@ -848,7 +963,7 @@ int main() {
         else if (game_state == GameState::PLAYING) {
 
             draw_board(window);
-            draw_pieces(window, board, font);
+            draw_pieces(window, board, sprite_cache);
             draw_legal_moves(window, ui.legal_moves_from_selection);
             
             {
@@ -866,39 +981,73 @@ int main() {
 
                 sidebar.setPosition(BOARD_SIZE, 0);
                 sidebar.setSize({SIDEBAR_WIDTH, WINDOW_HEIGHT});
-                sidebar.setFillColor(PANEL_COLOR);
+                sidebar.setFillColor(DARK_PANEL);
 
                 window.draw(sidebar);
 
-                // Engine Info
+                // Engine Info & Best Moves
                 sf::Text engine_text;
                 engine_text.setFont(font);
-                engine_text.setCharacterSize(18);
-                engine_text.setFillColor(TEXT_COLOR);
+                engine_text.setCharacterSize(14);
+                engine_text.setFillColor(ACCENT_COLOR);
 
                 {
                     std::lock_guard<std::mutex> lock(engine_mutex);
                     engine_text.setString(engine_info);
                 }
 
-                engine_text.setPosition(BOARD_SIZE + 15, 80);
+                engine_text.setPosition(BOARD_SIZE + 15, 15);
                 window.draw(engine_text);
 
-                // Move History
+                // Best Move Sequence
+                if (!ui.best_move_sequence.empty()) {
+                    sf::Text best_moves_text;
+                    best_moves_text.setFont(font);
+                    best_moves_text.setCharacterSize(12);
+                    best_moves_text.setFillColor(TEXT_COLOR);
+                    
+                    std::string best_line = "Best: ";
+                    for (size_t i = 0; i < std::min(size_t(3), ui.best_move_sequence.size()); i++) {
+                        best_line += ui.best_move_sequence[i];
+                        if (i < ui.best_move_sequence.size() - 1) best_line += " -> ";
+                    }
+                    
+                    best_moves_text.setString(best_line);
+                    best_moves_text.setPosition(BOARD_SIZE + 15, 70);
+                    window.draw(best_moves_text);
+                }
+
+                // Evaluation Score
+                sf::Text eval_text;
+                eval_text.setFont(font);
+                eval_text.setCharacterSize(12);
+                eval_text.setFillColor(sf::Color(100, 200, 100));
+                eval_text.setString("Eval: " + std::to_string(ui.eval_score / 100) + "." + 
+                                   std::to_string(std::abs(ui.eval_score % 100)));
+                eval_text.setPosition(BOARD_SIZE + 15, 100);
+                window.draw(eval_text);
+
+                // Move History (Vertical display)
+                sf::Text move_header;
+                move_header.setFont(font);
+                move_header.setCharacterSize(14);
+                move_header.setFillColor(ACCENT_COLOR);
+                move_header.setString("Move History:");
+                move_header.setPosition(BOARD_SIZE + 15, 140);
+                window.draw(move_header);
+                
                 sf::Text history_text;
                 history_text.setFont(font);
-                history_text.setCharacterSize(16);
+                history_text.setCharacterSize(13);
                 history_text.setFillColor(sf::Color(180, 180, 180));
                 
                 std::stringstream history_ss;
-                history_ss << "Moves: ";
                 for (size_t i = 0; i < ui.move_history.size(); i++) {
-                    history_ss << ui.move_history[i];
-                    if (i < ui.move_history.size() - 1) history_ss << " ";
+                    history_ss << std::to_string(i + 1) << ". " << ui.move_history[i] << "\n";
                 }
                 
                 history_text.setString(history_ss.str());
-                history_text.setPosition(BOARD_SIZE + 15, 450);
+                history_text.setPosition(BOARD_SIZE + 15, 165);
                 window.draw(history_text);
 
                 // Game Status
