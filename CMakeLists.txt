@@ -13,7 +13,6 @@ include_directories(
 )
 
 set(SOURCES 
-    bitboards/Position.cpp
     GUI/src/main.cpp
 )
 

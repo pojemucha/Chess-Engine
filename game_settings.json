@@ -1,0 +1,9 @@
+{
+  "search_time_ms": 500,
+  "alpha": -2986,
+  "beta": 9955,
+  "show_analysis": false,
+  "show_best_move": false,
+  "show_legal_moves": true,
+  "auto_save_weights": true
+}
