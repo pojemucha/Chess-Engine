@@ -10,7 +10,7 @@
 
 #include <fstream>
 #include <iostream>
-#include <string>
+#include <cstring>
 #include <cstdint>
 
 #include "EvalWeights.h"
@@ -27,7 +27,7 @@ namespace MyChess {
         static constexpr std::uint32_t FILE_MAGIC = 0x4D435754; 
         
         /// @brief Format version to prevent loading outdated/incompatible weight structures.
-        static constexpr std::uint32_t FILE_VERSION = 1;
+        static constexpr std::uint32_t FILE_VERSION = 2;
 
         /**
          * @struct FileHeader
@@ -107,8 +107,6 @@ namespace MyChess {
             // 3. Verify that all bytes were successfully read
             if (!file.good()) {
                 std::cerr << "[WeightsIO] Critical Error: Premature EOF or corrupted data in " << filename << std::endl;
-                // Note: At this point, the arrays might be partially overwritten. 
-                // In a production environment, we should call reset_to_defaults() here.
                 return false;
             }
 
@@ -119,25 +117,71 @@ namespace MyChess {
 
         /**
          * @brief Resets all evaluation parameters (Weights and PSTs) to their initial state.
-         * @note Requires DEFAULT_WEIGHT, DEFAULT_PST_MIDGAME, and DEFAULT_PST_ENDGAME 
-         * to be defined in EvalWeights.h.
+         * Dynamically generates symmetrical values for Black pieces.
          */
         static void reset_to_defaults() {
-            // Note for refactoring EvalWeights.h: 
-            // Instead of hardcoding values here (violating the DRY principle),
-            // you should define `const short DEFAULT_WEIGHT[12] = {...};` inside EvalWeights.h
-            // and use std::copy or std::memcpy here.
-
-            short default_weight[12] = {100, 320, 330, 500, 900, 0, -100, -320, -330, -500, -900, 0};
-            for (int i = 0; i < 12; i++) {
-                weight[i] = default_weight[i];
+            // Reset piece weights symmetrically
+            for (int i = 0; i < 6; i++) {
+                weight[i] = DEFAULT_WEIGHT[i];
+                weight[i + 6] = -DEFAULT_WEIGHT[i];
             }
 
-            // TODO: Restore default PSTs!
-            // std::memcpy(PST_Midgame, DEFAULT_PST_MIDGAME, sizeof(PST_Midgame));
-            // std::memcpy(PST_Endgame, DEFAULT_PST_ENDGAME, sizeof(PST_Endgame));
+            // Copy White PST defaults
+            for (int piece = 0; piece < 6; piece++) {
+                std::memcpy(PST_Midgame[piece], DEFAULT_PST_MIDGAME[piece], 64 * sizeof(double));
+                std::memcpy(PST_Endgame[piece], DEFAULT_PST_ENDGAME[piece], 64 * sizeof(double));
+            }
 
+            // Symmetrically generate Black PSTs (mirror vertically and invert evaluation)
+            for (short piece = 0; piece < 6; piece++) {
+                for (Square cell = 0; cell < 64; cell++) {
+                    Square mirrored_cell = cell ^ 56;
+                    PST_Midgame[piece + 6][mirrored_cell] = -PST_Midgame[piece][cell];
+                    PST_Endgame[piece + 6][mirrored_cell] = -PST_Endgame[piece][cell];
+                }
+            }
             std::cout << "[WeightsIO] All weights and PSTs have been reset to defaults." << std::endl;
+        }
+
+        /**
+         * @brief Beautifully prints the current piece weights and 8x8 PST tables to the console.
+         */
+        static void print_weights() {
+            const std::string piece_names[6] = { "PAWN", "KNIGHT", "BISHOP", "ROOK", "QUEEN", "KING" };
+            
+            std::cout << "\n=================================================" << std::endl;
+            std::cout << "             CURRENT ENGINE WEIGHTS              " << std::endl;
+            std::cout << "=================================================" << std::endl;
+            
+            std::cout << "\n--- PIECE VALUES ---" << std::endl;
+            for (int i = 0; i < 6; i++) {
+                std::cout << piece_names[i] << ": " << weight[i] << std::endl;
+            }
+
+            std::cout << "\n--- PST MIDGAME TABLES (WHITE) ---" << std::endl;
+            for (int piece = 0; piece < 6; piece++) {
+                std::cout << "\nPiece: " << piece_names[piece] << " (Midgame)" << std::endl;
+                for (int rank = 7; rank >= 0; rank--) {
+                    for (int file = 0; file < 8; file++) {
+                        int cell = rank * 8 + file;
+                        std::printf("%6.1f ", PST_Midgame[piece][cell]);
+                    }
+                    std::cout << std::endl;
+                }
+            }
+
+            std::cout << "\n--- PST ENDGAME TABLES (WHITE) ---" << std::endl;
+            for (int piece = 0; piece < 6; piece++) {
+                std::cout << "\nPiece: " << piece_names[piece] << " (Endgame)" << std::endl;
+                for (int rank = 7; rank >= 0; rank--) {
+                    for (int file = 0; file < 8; file++) {
+                        int cell = rank * 8 + file;
+                        std::printf("%6.1f ", PST_Endgame[piece][cell]);
+                    }
+                    std::cout << std::endl;
+                }
+            }
+            std::cout << "=================================================\n" << std::endl;
         }
     };
 }

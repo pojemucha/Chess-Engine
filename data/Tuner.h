@@ -12,7 +12,7 @@
 #include <cmath>
 #include <iostream>
 #include <fstream>
-#include <string>
+#include <cstring>
 #include <algorithm>
 
 #include "../bitboards/Position.h"
@@ -56,22 +56,22 @@ namespace MyChess {
          * @brief Rapidly evaluates the position using the sparse board representation.
          * Combines currently tuned PSTs/Weights with the pre-calculated structural bonus.
          */
-        inline short evaluate_entry(const TunerEntry& entry) const noexcept {
-            short mg_score = 0;
-            short eg_score = 0;
+        inline double evaluate_entry(const TunerEntry& entry) const noexcept {
+            double mg_score = 0;
+            double eg_score = 0;
 
-            for (Square sq = 0; sq < 64; ++sq) {
-                Piece p = entry.board[sq];
-                if (p != EMPTY) {
-                    mg_score += weight[p] + PST_Midgame[p][sq];
-                    eg_score += weight[p] + PST_Endgame[p][sq];
+            for (Square cell = 0; cell < 64; ++cell) {
+                Piece piece = entry.board[cell];
+                if (piece != EMPTY) {
+                    mg_score += weight[piece] + PST_Midgame[piece][cell];
+                    eg_score += weight[piece] + PST_Endgame[piece][cell];
                 }
             }
 
-            short base_score = (mg_score * entry.phase + eg_score * (24 - entry.phase)) / 24;
-            short final_eval = base_score + entry.static_bonus;
+            double base_score = (mg_score * entry.phase + eg_score * (24 - entry.phase)) / 24;
+            double final_eval = base_score + entry.static_bonus;
             
-            return (entry.side_to_move == WHITE) ? final_eval : -final_eval;
+            return final_eval;
         }
 
         /**
@@ -82,7 +82,7 @@ namespace MyChess {
             double total_error = 0.0;
 
             for (const auto& entry : entries) {
-                short eval = evaluate_entry(entry);
+                double eval = evaluate_entry(entry);
                 double P = sigmoid(eval, k);
                 total_error += std::pow(entry.result - P, 2.0);
             }
@@ -108,19 +108,19 @@ namespace MyChess {
             entry.result = result;
             entry.side_to_move = pos.get_side_to_move();
             
-            short mg_score = 0;
-            short eg_score = 0;
-            short phase = 0;
+            double mg_score = 0;
+            double eg_score = 0;
+            short  phase    = 0;
 
-            for (Square sq = 0; sq < 64; sq++) {
-                Piece p = pos.get_piece(sq);
-                entry.board[sq] = p;
+            for (Square cell = 0; cell < 64; cell++) {
+                Piece piece = pos.get_piece(cell);
+                entry.board[cell] = piece;
                 
-                if (p != EMPTY) {
-                    mg_score += weight[p] + PST_Midgame[p][sq];
-                    eg_score += weight[p] + PST_Endgame[p][sq];
+                if (piece != EMPTY) {
+                    mg_score += weight[piece] + PST_Midgame[piece][cell];
+                    eg_score += weight[piece] + PST_Endgame[piece][cell];
                     
-                    switch (p) {
+                    switch (piece) {
                         case WHITE_QUEEN:  case BLACK_QUEEN:  phase += 4; break;
                         case WHITE_ROOK:   case BLACK_ROOK:   phase += 2; break;
                         case WHITE_BISHOP: case BLACK_BISHOP: phase += 1; break;
@@ -133,10 +133,9 @@ namespace MyChess {
             if (phase > 24) phase = 24;
             entry.phase = phase;
 
-            // Extract the "structural bonus" (mobility, pawns, etc.) that we are NOT currently tuning.
-            short base_score = (mg_score * phase + eg_score * (24 - phase)) / 24;
-            short total_eval = pos.evaluate(); 
-            short white_eval = (entry.side_to_move == WHITE) ? total_eval : -total_eval;
+            double base_score = (mg_score * phase + eg_score * (24 - phase)) / 24;
+            double total_eval = pos.evaluate(); 
+            double white_eval = (entry.side_to_move == WHITE) ? total_eval : -total_eval;
             
             entry.static_bonus = white_eval - base_score;
 
@@ -217,11 +216,14 @@ namespace MyChess {
         }
 
         /**
-         * @brief Executes Stochastic Gradient Descent (SGD) to optimize evaluation parameters.
+         * @brief Executes Batch Gradient Descent (BGD) to optimize evaluation parameters.
+         * Accumulates gradients over the entire dataset before applying updates.
+         * This prevents parameter explosion and guarantees stable convergence.
+         * 
          * @param iterations Number of epochs to run.
-         * @param learning_rate Base multiplier for weight adjustments (e.g., 1000.0).
+         * @param learning_rate Base multiplier for weight adjustments.
          */
-        void train(int iterations = 100, double learning_rate = 1000.0) {
+        void train(int iterations = 100, double learning_rate = 1500.0) {
             if (entries.empty()) {
                 std::cout << "[Tuner] Dataset is empty" << std::endl;
                 return;
@@ -239,8 +241,16 @@ namespace MyChess {
             for (int iter = 0; iter < iterations; iter++) {
                 double total_error = 0.0;
 
+                // Allocate gradient accumulators on the stack to prevent dynamic allocations
+                double pst_mg_grad[6][64];
+                double pst_eg_grad[6][64];
+                double weight_grad[6];
+                std::memset(pst_mg_grad, 0, sizeof(pst_mg_grad));
+                std::memset(pst_eg_grad, 0, sizeof(pst_eg_grad));
+                std::memset(weight_grad, 0, sizeof(weight_grad));
+
                 for (const auto& entry : entries) {
-                    short eval = evaluate_entry(entry);
+                    double eval = evaluate_entry(entry);
                     double P = sigmoid(eval, K);
                     total_error += std::pow(entry.result - P, 2.0);
 
@@ -249,18 +259,44 @@ namespace MyChess {
                     double gradient = error_diff * (P * (1.0 - P)) * (K * std::log(10.0) / 400.0);
                     
                     // The adjustment maps the double-precision gradient to integer centipawns
-                    double adjustment = learning_rate * gradient; 
+                    double adjustment = gradient; 
                     
-                    // Directly apply the adjustment to the active features
-                    double apply_adj = (entry.side_to_move == WHITE) ? adjustment : -adjustment;
-                    
-                    for (Square sq = 0; sq < 64; ++sq) {
-                        Piece p = entry.board[sq];
-                        if (p != EMPTY) {
-                            PST_Midgame[p][sq] -= apply_adj;
-                            PST_Endgame[p][sq] -= apply_adj;
-                            weight[p] -= apply_adj;
+                    double mg_scale = static_cast<double>(entry.phase) / 24.0;
+                    double eg_scale = 1.0 - mg_scale;
+
+                    for (Square cell = 0; cell < 64; ++cell) {
+                        Piece piece = entry.board[cell];
+                        if (piece != EMPTY) {
+                            if (piece < BLACK_PAWN) {
+                                pst_mg_grad[piece][cell] += adjustment * mg_scale;
+                                pst_eg_grad[piece][cell] += adjustment * eg_scale;
+                                weight_grad[piece] += adjustment;
+                            } else {
+                                short white_piece = piece - 6;
+                                Square mirrored_cell = cell ^ 56; // Mirror vertically for black pieces
+                                pst_mg_grad[white_piece][mirrored_cell] -= adjustment * mg_scale;
+                                pst_eg_grad[white_piece][mirrored_cell] -= adjustment * eg_scale;
+                                weight_grad[white_piece] -= adjustment;
+                            }
                         }
+                    }
+                }
+                double scale = learning_rate / entries.size();
+
+                for (short piece = 0; piece < 6; piece++) {
+                    weight[piece] -= weight_grad[piece] * scale;
+                    for (Square cell = 0; cell < CELL_NB; cell++) {
+                        PST_Midgame[piece][cell] -= pst_mg_grad[piece][cell] * scale;
+                        PST_Endgame[piece][cell] -= pst_eg_grad[piece][cell] * scale;
+                    }
+                }
+
+                for (short piece = 0; piece < 6; piece++) {
+                    weight[piece + 6] = -weight[piece];
+                    for (Square cell = 0; cell < 64; cell++) {
+                        Square mirrored_cell = cell ^ 56; // Mirror vertically for black pieces
+                        PST_Midgame[piece + 6][mirrored_cell] = -PST_Midgame[piece][cell];
+                        PST_Endgame[piece + 6][mirrored_cell] = -PST_Endgame[piece][cell];
                     }
                 }
 

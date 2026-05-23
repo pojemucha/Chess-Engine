@@ -1,9 +1,10 @@
 /**
  * @file Position.h
- * @brief Chess board representation, move generation, and alpha-beta search logic.
+ * @brief Chess engine core containing board representation, move generation, and search algorithms.
  * 
- * Note: For future refactoring, consider splitting the Search and Move Generation 
- * routines into separate classes to strictly follow the Single Responsibility Principle (SRP).
+ * Refactored to adhere to the Single Responsibility Principle (SRP):
+ * - Position: Manages board state, move execution, and static evaluation.
+ * - Search: Manages alpha-beta traversal, time limits, and transposition tables.
  */
 
 #pragma once
@@ -21,6 +22,22 @@
 using Move = std::uint16_t;
 
 namespace MyChess {
+
+    /// @name Engine Constants
+    /// @{
+    namespace Constants {
+        constexpr short MAX_DEPTH = 64;         ///< Maximum expected search depth (ply).
+        constexpr short MAX_GAME_PLIES = 1024;  ///< Maximum game length (512 full moves) to prevent overflows.
+        constexpr short VALUE_INFINITE = 32767; ///< Infinite evaluation score
+        constexpr short VALUE_MATE = 32000;     ///< Score threshold for checkmate (used to detect mate in N)
+
+        constexpr short SCORE_TT = 30000;       ///< Bonus for moves found in the Transposition Table
+        constexpr short SCORE_KILLER_1 = 9000;  ///< Bonus for 1st killer move
+        constexpr short SCORE_KILLER_2 = 8000;  ///< Bonus for 2nd Killer move
+
+        constexpr size_t TT_SIZE = 1 << 20;     ///< ~1 Million entries (~24MB) for the Transposition Table
+    }
+    /// @}
 
     namespace Math {
         /// @brief De Bruijn sequence multiplier table for fallback LSB extraction.
@@ -53,9 +70,6 @@ namespace MyChess {
         }
     }
 
-    /// @brief Maximum expected search depth (ply).
-    constexpr short MAX_DEPTH = 64;
-
     /**
      * @enum move_flags
      * @brief 4-bit flags encoding the special properties of a move.
@@ -76,6 +90,23 @@ namespace MyChess {
         ALPHA, ///< Upper bound (Fail-low node)
         BETA   ///< Lower bound (Fail-high node)
     };
+
+    /// @name Move Bitwise Utilities
+    /// @{
+
+    /**
+     * @brief Packs 'from', 'to' squares and a special 'flag' into a 16-bit Move.
+     */
+    inline Move encode_move(const Square from, const Square to, const std::uint8_t flag) noexcept {
+        return (from | (to << 6) | (flag << 12));
+    }
+
+    // Bitwise decoders for the 16-bit move
+    inline Square get_from(const Move move) noexcept { return move & 0x3F; }
+    inline Square get_to(const Move move) noexcept { return (move >> 6) & 0x3F; }
+    inline std::uint8_t get_flag(const Move move) noexcept { return move >> 12; }
+    /// @}
+    
 
     /**
      * @struct UndoInfo
@@ -121,86 +152,50 @@ namespace MyChess {
         short phase;        ///< Game phase for evaluation scaling (0-24)
     };
     
-    // TODO: Move this to a dedicated Search class or allocating dynamically.
-    // Making it static in a header duplicates the 24MB array in every translation unit.
-    static TTEntry transposition_table[1 << 20];
-    
     /**
      * @class Position
-     * @brief Core engine class managing board representation, evaluation, and search.
-     */
+     * @brief Manages board state, move execution, and evaluation.
+    */
     class Position {
     private:
         // --- Board State ---
-        Board boards[PIECE_NB];          ///< Bitboards for each specific piece type
-        Board pieces[COLOR_NB];          ///< Aggregate bitboards for White and Black pieces
-        Board occupancy;                 ///< Bitboard of all pieces on the board (union of pieces[WHITE] and pieces[BLACK])
+        Board boards[PIECE_NB];                      ///< Bitboards for each specific piece type
+        Board pieces[COLOR_NB];                      ///< Aggregate bitboards for White and Black pieces
+        Board occupancy;                             ///< Bitboard of all pieces on the board (union of pieces[WHITE] and pieces[BLACK])
         Color side_to_move;
-        std::uint8_t castling_rights;    ///< 4-bit mask for castling avalability (KQkq)
+        std::uint8_t castling_rights;                ///< 4-bit mask for castling avalability (KQkq)
         std::uint8_t castling_mask[CELL_NB] = {
-            (std::uint8_t)~0x04, 15, 15, 15, (std::uint8_t)~(0x02 | 0x04), 15, 15, (std::uint8_t)~0x02,  // rank 1
-            15, 15, 15, 15, 15, 15, 15, 15,
-            15, 15, 15, 15, 15, 15, 15, 15,
-            15, 15, 15, 15, 15, 15, 15, 15,
-            15, 15, 15, 15, 15, 15, 15, 15,
-            15, 15, 15, 15, 15, 15, 15, 15,
-            15, 15, 15, 15, 15, 15, 15, 15,
-            (std::uint8_t)~0x10, 15, 15, 15, (std::uint8_t)~(0x08 | 0x10), 15, 15, (std::uint8_t)~0x08  // rank 8
+            (std::uint8_t)~0x04, 255, 255, 255, (std::uint8_t)~(0x02 | 0x04), 255, 255, (std::uint8_t)~0x02,  // rank 1
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            255, 255, 255, 255, 255, 255, 255, 255,
+            (std::uint8_t)~0x10, 255, 255, 255, (std::uint8_t)~(0x08 | 0x10), 255, 255, (std::uint8_t)~0x08  // rank 8
         };
-        Square en_passant_square;        ///< Current en passant target square (64 if none)
-        Piece piece_on_square[CELL_NB];  ///< Mailbox board representation (Array of 64)
+        Square en_passant_square;                    ///< Current en passant target square (64 if none)
+        Piece piece_on_square[CELL_NB];              ///< Mailbox board representation (Array of 64)
         
         // --- Search State ---
-        UndoInfo undo_history[MAX_DEPTH];///< Irreversible state history stack for unmake_move()
-        Square game_ply = 0;             ///< Current search depth from root
-        Square king_square[COLOR_NB];    ///< Cached king positions for quick check-detection and move generation
+        UndoInfo undo_history[Constants::MAX_GAME_PLIES]; ///< Irreversible state history stack for unmake_move()
+        Square game_ply = 0;                         ///< Current search depth from root
+        Square king_square[COLOR_NB];                ///< Cached king positions for quick check-detection and move generation
 
         // --- Evaluation & Hash ---
-        short mg_score, eg_score;        ///< Incrementally updated Midgame and Endgame scores for the current position
-        Board internal_hash;             ///< Incrementally updated Zobrist hash of the current position for transposition table lookups
-        short current_phase;             ///< Tapered evaluation phase (0 to 24) based on remaining material
-
-        // --- Search Control ---
-        bool abort_search;
-        long long nodes_visited;
-        std::chrono::steady_clock::time_point end_time_limit;
-        Move killer_moves[MAX_DEPTH][2]; ///< Heuristic: Moves that caused a beta cutoff at a given depth (2 per depth)
-        int history[64][64];             ///< Heuristic: Butterfly history table [from][to]
+        double mg_score, eg_score;                    ///< Incrementally updated Midgame and Endgame scores for the current position
+        Board internal_hash;                         ///< Incrementally updated Zobrist hash of the current position for transposition table lookups
+        short current_phase;                         ///< Tapered evaluation phase (0 to 24) based on remaining material
 
         public:
-            /**
-             * @brief Callback triggered periodically during the search.
-             * Useful for UCI communication (e.g., sending "info depth...", checking GUI interrupts).
-             */
-            std::function<void(const Position&)> on_node_update = nullptr;
-            
-            /// @brief Initializes an empty board with zeroed evaluation and search history.
-            Position() {
-                for (int i = 0; i < MAX_DEPTH; i++) {
-                    killer_moves[i][0] = 0;
-                    killer_moves[i][1] = 0;
-                }
-                for (int i = 0; i < 64; i++) {
-                    for (int j = 0; j < 64; j++) {
-                        history[i][j] = 0;
-                    }
-                }
-            }
+            /// @brief Initializes an empty board.
+            Position() {}
             
             /**
              * @brief Initializes the board from a given FEN string.
              * @param fen Forsyth-Edwards Notation string representing the position.
              */
             Position(const std::string& fen) {
-                for (int i = 0; i < MAX_DEPTH; i++) {
-                    killer_moves[i][0] = 0;
-                    killer_moves[i][1] = 0;
-                }
-                for (int i = 0; i < 64; i++) {
-                    for (int j = 0; j < 64; j++) {
-                        history[i][j] = 0;
-                    }
-                }
                 parse_FEN(fen);
             }
 
@@ -208,13 +203,6 @@ namespace MyChess {
         /// @name State Updaters
         /// @{
 
-        /**
-         * @brief Packs 'from', 'to' squares and a special 'flag' into a 16-bit Move.
-         */
-        inline Move encode_move(const Square from, const Square to, const std::uint8_t flag) noexcept {
-            return (from | (to << 6) | (flag << 12));
-        }
-        
         /**
          * @brief Removes a piece from the board and updates incremental evaluations.
          */
@@ -337,216 +325,35 @@ namespace MyChess {
                         Piece to_piece   = piece_on_square[to];
                         short victim_value   = std::abs(weight[to_piece]);
                         short attacker_value = std::abs(weight[from_piece]);
-                        short move_score     = (victim_value * 10) - (attacker_value / 10);
-                        list.add(encode_move(from, to, QUEEN_PROMOTION_AND_CAPTURE), move_score + weight[WHITE_QUEEN]);
-                        list.add(encode_move(from, to, KNIGHT_PROMOTION_AND_CAPTURE), move_score + weight[WHITE_KNIGHT] * 2);
-                        list.add(encode_move(from, to, ROOK_PROMOTION_AND_CAPTURE), move_score + weight[WHITE_ROOK]);
-                        list.add(encode_move(from, to, BISHOP_PROMOTION_AND_CAPTURE), move_score + weight[WHITE_BISHOP]);
+                        short move_score     = 10000 + (victim_value * 10) - (attacker_value / 10);
+                        list.add(encode_move(from, to, QUEEN_PROMOTION_AND_CAPTURE), 20000 + move_score + weight[WHITE_QUEEN]);
+                        list.add(encode_move(from, to, KNIGHT_PROMOTION_AND_CAPTURE), 15000 + move_score + weight[WHITE_KNIGHT] * 2);
+                        list.add(encode_move(from, to, ROOK_PROMOTION_AND_CAPTURE), 15000 + move_score + weight[WHITE_ROOK]);
+                        list.add(encode_move(from, to, BISHOP_PROMOTION_AND_CAPTURE), 15000 + move_score + weight[WHITE_BISHOP]);
                 } else {
-                        list.add(encode_move(from, to, QUEEN_PROMOTION), weight[WHITE_QUEEN]);
-                        list.add(encode_move(from, to, KNIGHT_PROMOTION), weight[WHITE_KNIGHT] * 2);
-                        list.add(encode_move(from, to, ROOK_PROMOTION), weight[WHITE_ROOK]);
-                        list.add(encode_move(from, to, BISHOP_PROMOTION), weight[WHITE_BISHOP]);
+                        list.add(encode_move(from, to, QUEEN_PROMOTION), 20000 + weight[WHITE_QUEEN]);
+                        list.add(encode_move(from, to, KNIGHT_PROMOTION), 15000 + weight[WHITE_KNIGHT] * 2);
+                        list.add(encode_move(from, to, ROOK_PROMOTION), 15000 + weight[WHITE_ROOK]);
+                        list.add(encode_move(from, to, BISHOP_PROMOTION), 15000 + weight[WHITE_BISHOP]);
                 }
             } else {
                 Piece from_piece = piece_on_square[from];
                 Piece to_piece   = piece_on_square[to];
                 short victim_value   = std::abs(weight[to_piece]);
                 short attacker_value = std::abs(weight[from_piece]);
-                short move_score     = (flag == CAPTURE) ? (victim_value * 10) - (attacker_value / 10) : 0;
+                short move_score     = 0;
+                if (flag == CAPTURE) {
+                    move_score = 10000 + victim_value * 10 - attacker_value / 10;
+                } else {
+                    double pst_delta = (current_phase * (PST_Midgame[from_piece][to] - PST_Midgame[from_piece][from]) + (24 - current_phase) * (PST_Endgame[from_piece][to] - PST_Endgame[from_piece][from])) / 24;
+                    move_score = static_cast<short>((from_piece >= BLACK_PAWN ? -pst_delta : pst_delta));
+                }
                 list.add(encode_move(from, to, flag), move_score);
             }
         }
 
-        // Bitwise decoders for the 16-bit move
-        inline Square get_from(const Move move) noexcept { return move & 0x3F; }
-        inline Square get_to(const Move move) noexcept { return (move >> 6) & 0x3F; }
-        inline std::uint8_t get_flag(const Move move) noexcept { return move >> 12; }
         /// @}
 
-    public:
-        /// @name Move Validation & Execution
-        /// @{
-
-        /**
-         * @brief Determines if a specific square is attacked by a given color.
-         * @param cell The square to check.
-         * @param attacker_color The side that might be attacking.
-         * @return True if at least one piece of attacker_color attacks the cell.
-         */
-        inline bool is_square_attacked(const Square cell, const Color attacker_color) noexcept {
-            Board rook_attacks = atlas.get_rook_attacks(cell, occupancy);
-            Board knight_attacks = atlas.get_knight_attacks(cell);
-            Board bishop_attacks = atlas.get_bishop_attacks(cell, occupancy);
-            Board king_attacks = atlas.get_king_attacks(cell);
-            Board pawn_attacks = atlas.get_pawn_attacks(Color(attacker_color ^ 1), cell);
-            Square change_color = (attacker_color == WHITE) ? 0 : 6;
-                if ((rook_attacks & boards[WHITE_ROOK + change_color]) || (rook_attacks & boards[WHITE_QUEEN + change_color]) 
-                || (bishop_attacks & boards[WHITE_BISHOP + change_color]) || (bishop_attacks & boards[WHITE_QUEEN + change_color]) 
-                || (knight_attacks & boards[WHITE_KNIGHT + change_color]) || (pawn_attacks & boards[WHITE_PAWN + change_color]) 
-                || (king_attacks & boards[WHITE_KING + change_color])) {
-                    return true;
-                }
-            return false;
-        }
-        
-        /**
-         * @brief Executes a move on the internal board state.
-         * Saves irreversible state to history and updates incremental values.
-         * @param move The encoded move to execute.
-         * @return False if the move is pseudo-legal but leaves the king in check (invalid).
-         */
-        inline bool make_move(const Move move) noexcept {
-            const Square from = get_from(move);
-            const Square to = get_to(move);
-            const std::uint8_t flag = get_flag(move);
-            const Piece moving_piece = piece_on_square[from];
-
-            undo_history[game_ply].castling_rights = castling_rights;
-            undo_history[game_ply].en_passant_square = en_passant_square;
-            undo_history[game_ply].captured_piece = piece_on_square[to];
-
-            en_passant_square = 64;
-
-            switch (flag) {
-                case SILENT_MOVE: move_piece(from, to); break;
-                case PAWN_DOUBLE_JUMP:
-                    move_piece(from, to);
-                    en_passant_square = (side_to_move == WHITE) ? (from + 8) : (from - 8);
-                    break;
-                case CASTLING: {
-                        Square rook_from = (to == 62) ? 63 : (to == 58) ? 56 : (to == 6) ? 7 : 0;
-                        Square rook_to = (to == 62) ? 61 : (to == 58) ? 59 : (to == 6) ? 5 : 3;
-                        move_piece(from, to);
-                        move_piece(rook_from, rook_to);
-                        break;
-                    }
-                case EN_PASSANT:
-                    undo_history[game_ply].captured_piece = (side_to_move == WHITE) ? BLACK_PAWN : WHITE_PAWN;
-                    remove_piece((to ^ 8ULL), Color(side_to_move ^ 1ULL));
-                    move_piece(from, to);
-                    break;
-                case CAPTURE: capture(from, to); break;
-                case KNIGHT_PROMOTION:
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_KNIGHT : BLACK_KNIGHT), side_to_move);
-                    break;
-                case BISHOP_PROMOTION:
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_BISHOP : BLACK_BISHOP), side_to_move);
-                    break;
-                case ROOK_PROMOTION:
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_ROOK : BLACK_ROOK), side_to_move);
-                    break;
-                case QUEEN_PROMOTION:
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_QUEEN : BLACK_QUEEN), side_to_move);
-                    break;
-                case KNIGHT_PROMOTION_AND_CAPTURE:
-                    remove_piece(to, Color(side_to_move ^ 1ULL));
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_KNIGHT : BLACK_KNIGHT), side_to_move);
-                    break;
-                case BISHOP_PROMOTION_AND_CAPTURE:
-                    remove_piece(to, Color(side_to_move ^ 1ULL));
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_BISHOP : BLACK_BISHOP), side_to_move);
-                    break;
-                case ROOK_PROMOTION_AND_CAPTURE:
-                    remove_piece(to, Color(side_to_move ^ 1ULL));
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_ROOK : BLACK_ROOK), side_to_move);
-                    break;
-                case QUEEN_PROMOTION_AND_CAPTURE:
-                    remove_piece(to, Color(side_to_move ^ 1ULL));
-                    remove_piece(from, side_to_move);
-                    put_piece(to, (side_to_move == WHITE ? WHITE_QUEEN : BLACK_QUEEN), side_to_move);
-                    break;
-            }
-
-            Square offset = (side_to_move == WHITE) ? 0 : 6;
-            king_square[side_to_move] = (moving_piece == (WHITE_KING + offset)) ? to : king_square[side_to_move];
-
-            if (undo_history[game_ply].en_passant_square != 64) internal_hash ^= atlas.z_ep[undo_history[game_ply].en_passant_square];
-            if (en_passant_square != 64) internal_hash ^= atlas.z_ep[en_passant_square % 8];
-            castling_rights &= (castling_mask[from] & castling_mask[to]);
-            internal_hash ^= atlas.z_castling[castling_rights] ^ atlas.z_castling[undo_history[game_ply].castling_rights];
-            side_to_move = Color(side_to_move ^ 1ULL);
-            internal_hash ^= atlas.z_side;
-            game_ply++;
-
-            if (is_square_attacked(king_square[Color(side_to_move ^ 1ULL)], side_to_move)) {
-                unmake_move(move);
-                return false;
-            }
-
-            return true;
-        }
-
-        /**
-         * @brief Restores the board state to the exact moment before the last make_move().
-         */
-        inline void unmake_move(const Move move) noexcept {
-            game_ply--;
-
-            const Square from = get_from(move);
-            const Square to = get_to(move);
-            const std::uint8_t flag = get_flag(move);
-            const Piece moving_piece = piece_on_square[to];
-
-            internal_hash ^= atlas.z_side;
-            side_to_move = Color(side_to_move ^ 1ULL);
-            internal_hash ^= atlas.z_castling[castling_rights] ^ atlas.z_castling[undo_history[game_ply].castling_rights];
-            castling_rights = undo_history[game_ply].castling_rights;
-
-            const Square offset = (side_to_move == WHITE) ? 0 : 6;
-            king_square[side_to_move] = (moving_piece == (WHITE_KING + offset)) ? from : king_square[side_to_move];
-
-            if (en_passant_square != 64) internal_hash ^= atlas.z_ep[en_passant_square % 8];
-            en_passant_square = undo_history[game_ply].en_passant_square;
-            if (en_passant_square != 64) internal_hash ^= atlas.z_ep[en_passant_square % 8];
-
-            switch (flag)
-            {
-            case CAPTURE:
-                move_piece(to, from);
-                put_piece(to, undo_history[game_ply].captured_piece, Color(side_to_move ^ 1ULL));
-                break;
-            case EN_PASSANT:
-                move_piece(to, from);
-                put_piece((to ^ 8), (side_to_move == WHITE ? BLACK_PAWN : WHITE_PAWN), Color(side_to_move ^ 1ULL));
-                break;
-            case CASTLING: {
-                    Square rook_from = (to == 62) ? 63 : (to == 58) ? 56 : (to == 6) ? 7 : 0;
-                    Square rook_to = (to == 62) ? 61 : (to == 58) ? 59 : (to == 6) ? 5 : 3;
-                    move_piece(rook_to, rook_from);
-                    move_piece(to, from);
-                    break;
-                }
-            case KNIGHT_PROMOTION:
-            case BISHOP_PROMOTION:
-            case ROOK_PROMOTION:
-            case QUEEN_PROMOTION:
-                remove_piece(to, side_to_move);
-                put_piece(from, (side_to_move == WHITE ? WHITE_PAWN : BLACK_PAWN), side_to_move);
-                break;
-            case KNIGHT_PROMOTION_AND_CAPTURE:
-            case BISHOP_PROMOTION_AND_CAPTURE:
-            case ROOK_PROMOTION_AND_CAPTURE:
-            case QUEEN_PROMOTION_AND_CAPTURE:
-                remove_piece(to, side_to_move);
-                put_piece(from, (side_to_move == WHITE ? WHITE_PAWN : BLACK_PAWN), side_to_move);
-                put_piece(to, undo_history[game_ply].captured_piece, Color(side_to_move ^ 1ULL));
-                break;
-            default:
-                move_piece(to, from);
-                break;
-            }
-        }
-        /// @}
-
-    private:
         /// @name Move Generation Sub-routines
         /// @{
 
@@ -557,7 +364,7 @@ namespace MyChess {
                 Piece to_piece   = piece_on_square[to];
                 short victim_value   = std::abs(weight[to_piece]);
                 short attacker_value = std::abs(weight[from_piece]);
-                short move_score     = (victim_value * 10) - (attacker_value / 10);
+                short move_score     = 10000 + (victim_value * 10) - (attacker_value / 10);
                 list.add(encode_move(from, to, CAPTURE), move_score);
                 board &= (board - 1);
             }
@@ -567,7 +374,8 @@ namespace MyChess {
             while (board) {
                 Square to = Math::countr_zero(board);
                 Piece piece = piece_on_square[from];
-                short move_score = PST_Midgame[piece][to] - PST_Midgame[piece][from];
+                double pst_delta = (current_phase * (PST_Midgame[piece][to] - PST_Midgame[piece][from]) + (24 - current_phase) * (PST_Endgame[piece][to] - PST_Endgame[piece][from])) / 24;
+                short move_score = static_cast<short>(piece >= BLACK_PAWN ? -pst_delta : pst_delta);
                 list.add(encode_move(from, to, SILENT_MOVE), move_score);
                 board &= (board - 1);
             }
@@ -708,20 +516,229 @@ namespace MyChess {
                 pawn_board &= (pawn_board - 1);
             }
         }
+        /// @}
 
-        inline MoveList generate_all_captures() noexcept {
-            MoveList list;
-            generate_queen_moves (list);
-            generate_rook_moves  (list);
-            generate_knight_moves(list);
-            generate_bishop_moves(list);
-            generate_pawn_moves  (list);
-            generate_king_moves  (list);
-            return list;
+    public:
+        /// @name Move Validation & Execution
+        /// @{
+
+        /**
+         * @brief Determines if a specific square is attacked by a given color.
+         * @param cell The square to check.
+         * @param attacker_color The side that might be attacking.
+         * @return True if at least one piece of attacker_color attacks the cell.
+         */
+        inline bool is_square_attacked(const Square cell, const Color attacker_color) noexcept {
+            Board rook_attacks = atlas.get_rook_attacks(cell, occupancy);
+            Board knight_attacks = atlas.get_knight_attacks(cell);
+            Board bishop_attacks = atlas.get_bishop_attacks(cell, occupancy);
+            Board king_attacks = atlas.get_king_attacks(cell);
+            Board pawn_attacks = atlas.get_pawn_attacks(Color(attacker_color ^ 1), cell);
+            Square change_color = (attacker_color == WHITE) ? 0 : 6;
+                if ((rook_attacks & boards[WHITE_ROOK + change_color]) || (rook_attacks & boards[WHITE_QUEEN + change_color]) 
+                || (bishop_attacks & boards[WHITE_BISHOP + change_color]) || (bishop_attacks & boards[WHITE_QUEEN + change_color]) 
+                || (knight_attacks & boards[WHITE_KNIGHT + change_color]) || (pawn_attacks & boards[WHITE_PAWN + change_color]) 
+                || (king_attacks & boards[WHITE_KING + change_color])) {
+                    return true;
+                }
+            return false;
+        }
+        
+        /**
+         * @brief Executes a move on the internal board state.
+         * Saves irreversible state to history and updates incremental values.
+         * @param move The encoded move to execute.
+         * @return False if the move is pseudo-legal but leaves the king in check (invalid).
+         */
+        inline bool make_move(const Move move) noexcept {
+            const Square from = get_from(move);
+            const Square to = get_to(move);
+            const std::uint8_t flag = get_flag(move);
+            const Piece moving_piece = piece_on_square[from];
+
+            undo_history[game_ply].castling_rights = castling_rights;
+            undo_history[game_ply].en_passant_square = en_passant_square;
+            undo_history[game_ply].captured_piece = piece_on_square[to];
+
+            en_passant_square = 64;
+
+            switch (flag) {
+                case SILENT_MOVE: move_piece(from, to); break;
+                case PAWN_DOUBLE_JUMP:
+                    move_piece(from, to);
+                    en_passant_square = (side_to_move == WHITE) ? (from + 8) : (from - 8);
+                    break;
+                case CASTLING: {
+                        Square rook_from = (to == 62) ? 63 : (to == 58) ? 56 : (to == 6) ? 7 : 0;
+                        Square rook_to = (to == 62) ? 61 : (to == 58) ? 59 : (to == 6) ? 5 : 3;
+                        move_piece(from, to);
+                        move_piece(rook_from, rook_to);
+                        break;
+                    }
+                case EN_PASSANT:
+                    undo_history[game_ply].captured_piece = (side_to_move == WHITE) ? BLACK_PAWN : WHITE_PAWN;
+                    remove_piece((to ^ 8ULL), Color(side_to_move ^ 1ULL));
+                    move_piece(from, to);
+                    break;
+                case CAPTURE: capture(from, to); break;
+                case KNIGHT_PROMOTION:
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_KNIGHT : BLACK_KNIGHT), side_to_move);
+                    break;
+                case BISHOP_PROMOTION:
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_BISHOP : BLACK_BISHOP), side_to_move);
+                    break;
+                case ROOK_PROMOTION:
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_ROOK : BLACK_ROOK), side_to_move);
+                    break;
+                case QUEEN_PROMOTION:
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_QUEEN : BLACK_QUEEN), side_to_move);
+                    break;
+                case KNIGHT_PROMOTION_AND_CAPTURE:
+                    remove_piece(to, Color(side_to_move ^ 1ULL));
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_KNIGHT : BLACK_KNIGHT), side_to_move);
+                    break;
+                case BISHOP_PROMOTION_AND_CAPTURE:
+                    remove_piece(to, Color(side_to_move ^ 1ULL));
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_BISHOP : BLACK_BISHOP), side_to_move);
+                    break;
+                case ROOK_PROMOTION_AND_CAPTURE:
+                    remove_piece(to, Color(side_to_move ^ 1ULL));
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_ROOK : BLACK_ROOK), side_to_move);
+                    break;
+                case QUEEN_PROMOTION_AND_CAPTURE:
+                    remove_piece(to, Color(side_to_move ^ 1ULL));
+                    remove_piece(from, side_to_move);
+                    put_piece(to, (side_to_move == WHITE ? WHITE_QUEEN : BLACK_QUEEN), side_to_move);
+                    break;
+            }
+
+            Square offset = (side_to_move == WHITE) ? 0 : 6;
+            king_square[side_to_move] = (moving_piece == (WHITE_KING + offset)) ? to : king_square[side_to_move];
+
+            if (undo_history[game_ply].en_passant_square != 64) internal_hash ^= atlas.z_ep[undo_history[game_ply].en_passant_square & 7];
+            if (en_passant_square != 64) internal_hash ^= atlas.z_ep[en_passant_square & 7];
+            castling_rights &= (castling_mask[from] & castling_mask[to]);
+            internal_hash ^= atlas.z_castling[castling_rights] ^ atlas.z_castling[undo_history[game_ply].castling_rights];
+            side_to_move = Color(side_to_move ^ 1ULL);
+            internal_hash ^= atlas.z_side;
+            game_ply++;
+
+            if (is_square_attacked(king_square[Color(side_to_move ^ 1ULL)], side_to_move)) {
+                unmake_move(move);
+                return false;
+            }
+
+            return true;
+        }
+
+        /**
+         * @brief Restores the board state to the exact moment before the last make_move().
+         */
+        inline void unmake_move(const Move move) noexcept {
+            game_ply--;
+
+            const Square from = get_from(move);
+            const Square to = get_to(move);
+            const std::uint8_t flag = get_flag(move);
+            const Piece moving_piece = piece_on_square[to];
+
+            internal_hash ^= atlas.z_side;
+            side_to_move = Color(side_to_move ^ 1ULL);
+            internal_hash ^= atlas.z_castling[castling_rights] ^ atlas.z_castling[undo_history[game_ply].castling_rights];
+            castling_rights = undo_history[game_ply].castling_rights;
+
+            const Square offset = (side_to_move == WHITE) ? 0 : 6;
+            king_square[side_to_move] = (moving_piece == (WHITE_KING + offset)) ? from : king_square[side_to_move];
+
+            if (en_passant_square != 64) internal_hash ^= atlas.z_ep[en_passant_square % 8];
+            en_passant_square = undo_history[game_ply].en_passant_square;
+            if (en_passant_square != 64) internal_hash ^= atlas.z_ep[en_passant_square % 8];
+
+            switch (flag)
+            {
+            case CAPTURE:
+                move_piece(to, from);
+                put_piece(to, undo_history[game_ply].captured_piece, Color(side_to_move ^ 1ULL));
+                break;
+            case EN_PASSANT:
+                move_piece(to, from);
+                put_piece((to ^ 8), (side_to_move == WHITE ? BLACK_PAWN : WHITE_PAWN), Color(side_to_move ^ 1ULL));
+                break;
+            case CASTLING: {
+                    Square rook_from = (to == 62) ? 63 : (to == 58) ? 56 : (to == 6) ? 7 : 0;
+                    Square rook_to = (to == 62) ? 61 : (to == 58) ? 59 : (to == 6) ? 5 : 3;
+                    move_piece(rook_to, rook_from);
+                    move_piece(to, from);
+                    break;
+                }
+            case KNIGHT_PROMOTION:
+            case BISHOP_PROMOTION:
+            case ROOK_PROMOTION:
+            case QUEEN_PROMOTION:
+                remove_piece(to, side_to_move);
+                put_piece(from, (side_to_move == WHITE ? WHITE_PAWN : BLACK_PAWN), side_to_move);
+                break;
+            case KNIGHT_PROMOTION_AND_CAPTURE:
+            case BISHOP_PROMOTION_AND_CAPTURE:
+            case ROOK_PROMOTION_AND_CAPTURE:
+            case QUEEN_PROMOTION_AND_CAPTURE:
+                remove_piece(to, side_to_move);
+                put_piece(from, (side_to_move == WHITE ? WHITE_PAWN : BLACK_PAWN), side_to_move);
+                put_piece(to, undo_history[game_ply].captured_piece, Color(side_to_move ^ 1ULL));
+                break;
+            default:
+                move_piece(to, from);
+                break;
+            }
+        }
+
+        /**
+         * @brief Executes a null move (passes the turn to the opponent).
+         * Used for Null Move Pruning (NMP) during search. Saves state,
+         * clears the en passant square, and updates the Zobrist hash symmetrically.
+         */
+        inline void make_null_move() noexcept {
+            undo_history[game_ply].castling_rights = castling_rights;
+            undo_history[game_ply].en_passant_square = en_passant_square;
+            undo_history[game_ply].captured_piece = EMPTY;
+
+            // If an en passant square was active, we MUST remove its Zobrist contribution
+            if (en_passant_square != 64) {
+                internal_hash ^= atlas.z_ep[en_passant_square & 7];
+                en_passant_square = 64;
+            }
+
+            side_to_move = Color(side_to_move ^ 1ULL);
+            internal_hash ^= atlas.z_side;
+            game_ply++;
+        }
+
+        /**
+         * @brief Restores the board state to the moment before the last make_null_move().
+         */
+        inline void unmake_null_move() noexcept {
+            game_ply--;
+            
+            side_to_move = Color(side_to_move ^ 1ULL);
+            internal_hash ^= atlas.z_side;
+
+            castling_rights = undo_history[game_ply].castling_rights;
+
+            en_passant_square = undo_history[game_ply].en_passant_square;
+            // Restore the Zobrist contribution of the en passant square if it was active
+            if (en_passant_square != 64) {
+                internal_hash ^= atlas.z_ep[en_passant_square & 7];
+            }
         }
         /// @}
 
-        public:    
         /// @name Setup & Evaluation
         /// @{
 
@@ -786,20 +803,20 @@ namespace MyChess {
                     Square cell = rank * 8 + file;
                     if (cell >= 0 && cell < 64) {
                         switch (fen[counter]) {
-                            case 'r': put_piece(cell, BLACK_ROOK, BLACK); internal_hash ^= atlas.z_pieces[BLACK_ROOK][cell]; break;
-                            case 'n': put_piece(cell, BLACK_KNIGHT, BLACK); internal_hash ^= atlas.z_pieces[BLACK_KNIGHT][cell]; break;
-                            case 'b': put_piece(cell, BLACK_BISHOP, BLACK); internal_hash ^= atlas.z_pieces[BLACK_BISHOP][cell]; break;
-                            case 'q': put_piece(cell, BLACK_QUEEN, BLACK); internal_hash ^= atlas.z_pieces[BLACK_QUEEN][cell]; break;
-                            case 'k': put_piece(cell, BLACK_KING, BLACK); internal_hash ^= atlas.z_pieces[BLACK_KING][cell]; king_square[BLACK] = cell; break;
-                            case 'p': put_piece(cell, BLACK_PAWN, BLACK); internal_hash ^= atlas.z_pieces[BLACK_PAWN][cell]; break;
-                            case 'R': put_piece(cell, WHITE_ROOK, WHITE); internal_hash ^= atlas.z_pieces[WHITE_ROOK][cell]; break;
-                            case 'N': put_piece(cell, WHITE_KNIGHT, WHITE); internal_hash ^= atlas.z_pieces[WHITE_KNIGHT][cell]; break;
-                            case 'B': put_piece(cell, WHITE_BISHOP, WHITE); internal_hash ^= atlas.z_pieces[WHITE_BISHOP][cell]; break;
-                            case 'Q': put_piece(cell, WHITE_QUEEN, WHITE); internal_hash ^= atlas.z_pieces[WHITE_QUEEN][cell]; break;
-                            case 'K': put_piece(cell, WHITE_KING, WHITE); internal_hash ^= atlas.z_pieces[WHITE_KING][cell]; king_square[WHITE] = cell; break;
-                            case 'P': put_piece(cell, WHITE_PAWN, WHITE); internal_hash ^= atlas.z_pieces[WHITE_PAWN][cell]; break;
+                            case 'r': put_piece(cell, BLACK_ROOK, BLACK); break;
+                            case 'n': put_piece(cell, BLACK_KNIGHT, BLACK); break;
+                            case 'b': put_piece(cell, BLACK_BISHOP, BLACK); break;
+                            case 'q': put_piece(cell, BLACK_QUEEN, BLACK); break;
+                            case 'k': put_piece(cell, BLACK_KING, BLACK); king_square[BLACK] = cell; break;
+                            case 'p': put_piece(cell, BLACK_PAWN, BLACK); break;
+                            case 'R': put_piece(cell, WHITE_ROOK, WHITE); break;
+                            case 'N': put_piece(cell, WHITE_KNIGHT, WHITE); break;
+                            case 'B': put_piece(cell, WHITE_BISHOP, WHITE); break;
+                            case 'Q': put_piece(cell, WHITE_QUEEN, WHITE); break;
+                            case 'K': put_piece(cell, WHITE_KING, WHITE); king_square[WHITE] = cell; break;
+                            case 'P': put_piece(cell, WHITE_PAWN, WHITE); break;
                             default:
-                                if (fen[counter] >= '1' && fen[counter] <= '8') file += fen[counter] - '1' - 1; // -1 as it gets +1 later
+                                if (fen[counter] >= '1' && fen[counter] <= '8') file += fen[counter] - '1' - 1;
                                 break;
                         }
                     }
@@ -856,33 +873,27 @@ namespace MyChess {
             if (phase > 24) phase = 24;
             short base_score = (mg_score * phase + eg_score * (24 - phase)) / 24;
 
-            // Дополнительные эвристики
             short bonus = 0;
 
-            // 1. Мобильность (количество легальных ходов)
-            // Приблизительная оценка без полной генерации
             int white_mobility = 0;
             int black_mobility = 0;
 
-            // Подсчет мобильности для коней
             Board white_knights = boards[WHITE_KNIGHT];
             while (white_knights) {
-                Square sq = Math::countr_zero(white_knights);
-                white_mobility += Math::count_bits(atlas.get_knight_attacks(sq) & ~pieces[WHITE]);
+                Square cell = Math::countr_zero(white_knights);
+                white_mobility += Math::count_bits(atlas.get_knight_attacks(cell) & ~pieces[WHITE]);
                 white_knights &= white_knights - 1;
             }
 
             Board black_knights = boards[BLACK_KNIGHT];
             while (black_knights) {
-                Square sq = Math::countr_zero(black_knights);
-                black_mobility += Math::count_bits(atlas.get_knight_attacks(sq) & ~pieces[BLACK]);
+                Square cell = Math::countr_zero(black_knights);
+                black_mobility += Math::count_bits(atlas.get_knight_attacks(cell) & ~pieces[BLACK]);
                 black_knights &= black_knights - 1;
             }
 
             bonus += (white_mobility - black_mobility) * 5;
 
-            // 2. Пешечная структура
-            // Штраф за сдвоенные пешки
             for (int file = 0; file < 8; file++) {
                 Board file_mask = 0x0101010101010101ULL << file;
                 int white_pawns_on_file = Math::count_bits(boards[WHITE_PAWN] & file_mask);
@@ -892,21 +903,18 @@ namespace MyChess {
                 if (black_pawns_on_file > 1) bonus += (black_pawns_on_file - 1) * 15;
             }
 
-            // Бонус за проходные пешки
             Board white_pawns = boards[WHITE_PAWN];
             while (white_pawns) {
-                Square sq = Math::countr_zero(white_pawns);
-                int rank = sq / 8;
-                int file = sq % 8;
+                Square cell = Math::countr_zero(white_pawns);
+                int rank = cell / 8;
+                int file = cell % 8;
 
-                // Проверяем, есть ли черные пешки впереди
-                Board front_mask = 0xFFFFFFFFFFFFFFFFULL << (sq + 8);
+                Board front_mask = (cell < 56) ? (0xFFFFFFFFFFFFFFFFULL << (cell + 8)) : 0ULL;
                 Board file_and_adjacent = 0x0101010101010101ULL << file;
                 if (file > 0) file_and_adjacent |= 0x0101010101010101ULL << (file - 1);
                 if (file < 7) file_and_adjacent |= 0x0101010101010101ULL << (file + 1);
 
                 if (!(boards[BLACK_PAWN] & front_mask & file_and_adjacent)) {
-                    // Проходная пешка
                     bonus += (rank - 1) * 10 + 20;
                 }
 
@@ -915,11 +923,11 @@ namespace MyChess {
 
             Board black_pawns = boards[BLACK_PAWN];
             while (black_pawns) {
-                Square sq = Math::countr_zero(black_pawns);
-                int rank = sq / 8;
-                int file = sq % 8;
+                Square cell = Math::countr_zero(black_pawns);
+                int rank = cell / 8;
+                int file = cell % 8;
 
-                Board front_mask = 0xFFFFFFFFFFFFFFFFULL >> (64 - sq);
+                Board front_mask = (cell > 7) ? (0xFFFFFFFFFFFFFFFFULL >> (64 - cell)) : 0ULL;
                 Board file_and_adjacent = 0x0101010101010101ULL << file;
                 if (file > 0) file_and_adjacent |= 0x0101010101010101ULL << (file - 1);
                 if (file < 7) file_and_adjacent |= 0x0101010101010101ULL << (file + 1);
@@ -931,7 +939,6 @@ namespace MyChess {
                 black_pawns &= black_pawns - 1;
             }
 
-            // 3. Контроль центра (e4, d4, e5, d5)
             Board center_squares = (1ULL << 27) | (1ULL << 28) | (1ULL << 35) | (1ULL << 36);
             int white_center_control = Math::count_bits(pieces[WHITE] & center_squares);
             int black_center_control = Math::count_bits(pieces[BLACK] & center_squares);
@@ -942,197 +949,17 @@ namespace MyChess {
         }
         /// @}
 
-    private:
-        /// @name Search Algorithms
-        /// @{
-
-        /**
-         * @brief Main Alpha-Beta search routine with Late Move Reductions (LMR) and transposition table.
-         * @param depth Remaining search depth.
-         * @param alpha Lower bound score.
-         * @param beta Upper bound score.
-         * @param ply_from_root Distance from the root node.
-         * @return The best score found in the sub-tree.
-         */
-        inline short search(short depth, short alpha, short beta, short ply_from_root) noexcept {
-            if (depth == 0) return quiescence(alpha, beta);
-
-            short temp = alpha;
-            Board index = internal_hash & ((1 << 20) - 1);
-
-            Move tt_move = 0;
-            if (transposition_table[index].key == internal_hash) {
-                tt_move = transposition_table[index].best_move;
-                if (transposition_table[index].depth >= depth) {
-                    short tt_score = transposition_table[index].score;
-                    switch (transposition_table[index].flag) {
-                        case EXACT: return tt_score;
-                        case ALPHA: if (tt_score <= alpha) return tt_score; break;
-                        case BETA: if (tt_score >= beta) return tt_score; break;
-                    }
-                }
-            }
-
-            bool in_check = is_square_attacked(king_square[side_to_move], Color(side_to_move ^ 1ULL));
-            if (depth >= 3 && !in_check && ply_from_root > 0 && current_phase > 6) {
-                short static_eval = evaluate();
-                if (static_eval >= beta) {
-                    // side_to_move = Color(side_to_move ^ 1ULL);
-                    // internal_hash ^= atlas.z_side;
-
-                    short null_score = -search(depth - 3, -beta, -beta + 1, ply_from_root + 1);
-
-                    // side_to_move = Color(side_to_move ^ 1ULL);
-                    // internal_hash ^= atlas.z_side;
-
-                    if (abort_search) return 0;
-
-                    if (null_score >= beta) {
-                        return beta;
-                    }
-                }
-            }
-            
-
-            MoveList moves = generate_all_moves();
-            score_moves(moves, tt_move, ply_from_root);
-
-            short best_score = -32768;
-            Move best_move = 0;
-            short legal_moves = 0;
-
-            for (Square i = 0; i < moves.count; i++) {
-                pick_move(moves, i);
-                Move current_move = moves.moves[i];
-                if (!make_move(current_move)) continue;
-                legal_moves++;
-
-                short score;
-                std::uint8_t flag = get_flag(current_move);
-                bool is_capture = (flag == CAPTURE || flag >= KNIGHT_PROMOTION_AND_CAPTURE);
-
-                // Late Move Reductions (LMR)
-                if (i >= 4 && depth >= 3 && !is_capture && !in_check) {
-                    score = -search(depth - 2, -alpha - 1, -alpha, ply_from_root + 1);
-
-                    if (score > alpha) {
-                        score = -search(depth - 1, -beta, -alpha, ply_from_root + 1);
-                    }
-                } else {
-                    score = -search(depth - 1, -beta, -alpha, ply_from_root + 1);
-                }
-
-                unmake_move(current_move);
-
-                if (abort_search) return 0;
-                check_time();
-
-                if (score > best_score) {
-                    best_score = score;
-                    best_move = current_move;
-                }
-
-                if (score >= beta) {
-                    // Beta cutoff - update killer moves and history for quiet moves
-                    if (!is_capture && ply_from_root < MAX_DEPTH) {
-                        // Update killer moves
-                        if (killer_moves[ply_from_root][0] != current_move) {
-                            killer_moves[ply_from_root][1] = killer_moves[ply_from_root][0];
-                            killer_moves[ply_from_root][0] = current_move;
-                        }
-
-                        // Update history heuristic
-                        Square from = get_from(current_move);
-                        Square to = get_to(current_move);
-                        history[from][to] += depth * depth;
-                    }
-
-                    alpha = score;
-                    break;
-                }
-
-                if (score > alpha) alpha = score;
-            }
-            if (legal_moves == 0) {
-                if (is_square_attacked(king_square[side_to_move], Color(side_to_move ^ 1ULL)))
-                    return -32000 + depth;
-                return 0;
-            }
-            transposition_table[index].key = internal_hash;
-            transposition_table[index].best_move = best_move;
-            transposition_table[index].score = best_score;
-            transposition_table[index].depth = depth;
-            transposition_table[index].flag = (best_score >= beta) ? BETA : ((best_score > temp) ? EXACT : ALPHA);
-            transposition_table[index].phase = current_phase;
-
-            return best_score;
+        inline MoveList generate_all_captures() noexcept {
+            MoveList list;
+            generate_queen_moves (list);
+            generate_rook_moves  (list);
+            generate_knight_moves(list);
+            generate_bishop_moves(list);
+            generate_pawn_moves  (list);
+            generate_king_moves  (list);
+            return list;
         }
 
-        /**
-         * @brief Quiescence search to resolve tactical sequences (captures) and avoid the horizon effect.
-         */
-        inline short quiescence(short alpha, short beta) {
-            short stand_pat = evaluate();
-            if (stand_pat >= beta) return beta;
-            if (stand_pat > alpha) alpha = stand_pat;
-
-            MoveList moves = generate_all_captures();
-            
-            for (Square i = 0; i < moves.count; i++) {
-                pick_move(moves, i);
-                if (!make_move(moves.moves[i])) continue;
-                short score = -quiescence(-beta, -alpha);
-                unmake_move(moves.moves[i]);
-
-                if (score >= beta) return beta;
-                if (score > alpha) alpha = score;
-            }
-            return alpha;
-        }
-
-        inline Move find_best_move(short depth, short alpha, short beta, short& out_score) {
-            Move best_move_found = 0;
-            short best_score = -32768;
-            MoveList moves = generate_all_moves();
-
-            Board index = internal_hash & ((1 << 20) - 1);
-            Move tt_move = 0;
-            if (transposition_table[index].key == internal_hash) {
-                tt_move = transposition_table[index].best_move;
-            }
-            score_moves(moves, tt_move, 0);
-
-            for (Square i = 0; i < moves.count; i++) {
-                pick_move(moves, i);
-                if (!make_move(moves.moves[i])) continue;
-                short score = -search(depth - 1, -beta, -alpha, 1);
-                unmake_move(moves.moves[i]);
-
-                if (abort_search) return best_move_found;
-                if (score > best_score) {
-                    best_score = score;
-                    best_move_found = moves.moves[i];
-                }
-                if (score > alpha) {
-                    alpha = score;
-                }
-            }
-
-            out_score = best_score;
-
-            if (best_move_found != 0) {
-                transposition_table[index].key = internal_hash;
-                transposition_table[index].best_move = best_move_found;
-                transposition_table[index].score = best_score;
-                transposition_table[index].depth = depth;
-                transposition_table[index].flag = EXACT;
-                transposition_table[index].phase = current_phase;
-            }
-            return best_move_found;
-        }
-        /// @}
-    
-    public:
         /**
          * @brief Generates all pseudo-legal moves in the position.
          */
@@ -1152,16 +979,103 @@ namespace MyChess {
             generate_king_moves  (list, false);
             return list;
         }
+        /// @name Accessors
+        /// @{
+
+        inline Board get_hash() const noexcept { return internal_hash; }
+        
+        inline short get_phase() const noexcept { return current_phase; }
+        
+        /// @brief Gets the piece located on the given square.
+        inline Piece get_piece(Square cell) const noexcept { return piece_on_square[cell]; }
+        
+        /// @brief Gets the color of the side currently to move.
+        inline Color get_side_to_move() const noexcept { return side_to_move; }
+
+        inline Square get_king_square(Color color) const noexcept { return king_square[color]; }
+
+        /// @brief Gets the current game ply (distance from the search root).
+        inline Square get_game_ply() const noexcept { return game_ply; }
+        /// @}
+    };
+
+    /**
+     * @class Search
+     * @brief Manages the Alpha-Beta traversal, heuristic, and Time Management for the chess engine. 
+     * Contains the main search loop, quiescence search, and move ordering logic.
+     */
+    class Search {
+    private:
+        // --- Search Control ---
+        std::vector<TTEntry> transposition_table;              ///< Transposition Table for caching previously evaluated positions
+        Move killer_moves[Constants::MAX_DEPTH][2];            ///< Heuristic: Moves that caused a beta cutoff at a given depth (2 per depth)
+        int history[CELL_NB][CELL_NB];                         ///< Heuristic: Butterfly history table [from][to]
+        
+        bool abort_search;
+        long long nodes_visited;
+        std::chrono::steady_clock::time_point end_time_limit;
+    
+        /**
+         * @brief Normalizes mate scores to be relative to the root node before saving to TT. 
+         * This ensures that mate scores are consistent regardless of the depth at which they were found.
+         */
+        inline short value_to_tt(short value, short ply) const noexcept {
+            if (value > Constants::VALUE_MATE - Constants::MAX_DEPTH) {
+                return value + ply;
+            } 
+            if (value < -Constants::VALUE_MATE + Constants::MAX_DEPTH) {
+                return value - ply;
+            }
+            return value;
+        }
 
         /**
-         * @brief Initiates an Iterative Deepening search to find the best move within a time limit.
+         * @brief Re-adjusts mate scores to be relative to the current search depth upon loading form TT. 
+         * This is the inverse of value_to_tt and ensures that mate scores are interpreted correctly at different depths.
+         */
+        inline short value_from_tt(short value, short ply) const noexcept {
+            if (value > Constants::VALUE_MATE - Constants::MAX_DEPTH) {
+                return value - ply;
+            } 
+            if (value < -Constants::VALUE_MATE + Constants::MAX_DEPTH) {
+                return value + ply;
+            }
+            return value;
+        }
+
+    public:
+        /**
+         * @brief Callback triggered periodically during the search.
+         * Useful for UCI communication (e.g., sending "info depth...", checking GUI interrupts).
+         */
+        std::function<void(const Position&)> on_node_update = nullptr;
+        
+        Search() : transposition_table(Constants::TT_SIZE) {
+            clear_heuristics();
+        }
+
+        void clear_heuristics() {
+            for (int i = 0; i < Constants::MAX_DEPTH; i++) {
+                killer_moves[i][0] = 0;
+                killer_moves[i][1] = 0;
+            }
+            for (Square from = 0; from < CELL_NB; from++) {
+                for (Square to = 0; to < CELL_NB; to++) {
+                    history[from][to] = 0;
+                }
+            }
+        }
+
+        /**
+         * @brief Initiates an Iterative Deepening search using Aspiration Windows to find the best move within a time limit.
+         * @param pos Reference to the current position.
          * @param time_limit_ms Maximum allowed time for the search.
          * @param alpha Initial lower bound (typically -INF).
          * @param beta Initial upper bound (typically +INF).
          * @param out_score Reference to store the evaluation score of the best move.
          * @return The best move found.
          */
-        Move get_best_move(std::chrono::milliseconds time_limit_ms, short alpha, short beta, short& out_score) {
+        Move get_best_move(Position& pos,std::chrono::milliseconds time_limit_ms, short alpha, short beta, short& out_score) {
             abort_search = false;
             nodes_visited = 0;
             short depth = 1;
@@ -1170,21 +1084,59 @@ namespace MyChess {
             end_time_limit = std::chrono::steady_clock::now() + time_limit_ms;
 
             // Clear killer moves for new search
-            for (int i = 0; i < MAX_DEPTH; i++) {
+            for (int i = 0; i < Constants::MAX_DEPTH; i++) {
                 killer_moves[i][0] = 0;
                 killer_moves[i][1] = 0;
             }
 
-            while (!abort_search && depth <= MAX_DEPTH) {
-                current_depth_best = find_best_move(depth, alpha, beta, out_score);
-                if (!abort_search && current_depth_best != 0) {
-                    best_move = current_depth_best;
-                    Board index = internal_hash & ((1 << 20) - 1);
-                    if (transposition_table[index].key == internal_hash) {
-                        out_score = transposition_table[index].score;
-                    }
+            short prev_score = 0;
+            short aspiration_delta = 20; // Starts at ~1/5 of a pawn and will widen if needed
+
+            while (!abort_search && depth <= Constants::MAX_DEPTH) {
+                short temp_alpha = -Constants::VALUE_INFINITE;
+                short temp_beta = Constants::VALUE_INFINITE;
+
+                if (depth >= 5) {
+                    temp_alpha = prev_score - aspiration_delta;
+                    temp_beta = prev_score + aspiration_delta;
                 }
-                depth++;
+
+                while (!abort_search) {
+                    current_depth_best = find_best_move(pos, depth, temp_alpha, temp_beta, out_score);
+
+                    if (abort_search) break;
+                    if (out_score <= temp_alpha) {
+                        if (temp_alpha <= -Constants::VALUE_INFINITE + aspiration_delta + 5) {
+                            break;
+                        }
+                        // Fail-low: the true score is lower than our window, so we need to widen and re-search
+                        temp_alpha = std::max(static_cast<short>(-Constants::VALUE_INFINITE), static_cast<short>(temp_alpha - aspiration_delta));
+                        aspiration_delta += 25; // Increase the delta for the next iteration to widen the window more aggressively
+                    } else if (out_score >= temp_beta) {
+                        if (temp_beta >= Constants::VALUE_INFINITE - aspiration_delta - 5) {
+                            break;
+                        }
+                        // Fail-high: the true score is higher than our window, so we need to widen and re-search
+                        temp_beta = std::min(static_cast<short>(Constants::VALUE_INFINITE), static_cast<short>(temp_beta + aspiration_delta));
+                        aspiration_delta += 25; // Increase the delta for the next iteration to widen the window more aggressively
+                    } else {
+                        // Success: Score is within the window. Record the results and advance depth.
+                        if (current_depth_best != 0) {
+                            best_move = current_depth_best;
+                            prev_score = out_score;
+                            aspiration_delta = std::max(15, aspiration_delta - 5); // Narrow down slightly the window for the next depth
+                        }
+                        depth++;
+                        break;
+                    }
+
+                    if (!abort_search && current_depth_best != 0) {
+                        best_move = current_depth_best;
+                        prev_score = out_score;
+                        aspiration_delta = std::max(15, aspiration_delta - 5); // Narrow down slightly the window for the next depth
+                    }
+                    depth++;
+                }
             }
             return best_move;
         }
@@ -1192,25 +1144,290 @@ namespace MyChess {
         /**
          * @brief Retrieves the Principal Variation (PV) line from the Transposition Table.
          */
-        inline std::vector<Move> get_PV(Square max_length) {
+        inline std::vector<Move> get_PV(Position pos, Square max_length) {
             std::vector<Move> pv;
             for (Square i = 0; i < max_length; i++) {
-                Board index = internal_hash & ((1 << 20) - 1);
-                if (transposition_table[index].key == internal_hash && transposition_table[index].best_move != 0) {
+                Board index = pos.get_hash() & ((1 << 20) - 1);
+                if (transposition_table[index].key == pos.get_hash() && transposition_table[index].best_move != 0) {
                     Move tt_move = transposition_table[index].best_move;
-                    if (!make_move(tt_move)) break;
+                    if (!pos.make_move(tt_move)) break;
                     pv.push_back(tt_move);
                 } else {
                     break;
                 }
             }
-            for (int i = (int)pv.size() - 1; i >= 0; i--) {
-                unmake_move(pv[i]);
-            }
             return pv;
         }
 
     private:
+        /// @name Search Algorithms
+        /// @{
+
+        inline Move find_best_move(Position& pos, short depth, short alpha, short beta, short& out_score) {
+            Move best_move_found = 0;
+            short best_score = -Constants::VALUE_INFINITE;
+            MoveList moves = pos.generate_all_moves();
+
+            Board hash   = pos.get_hash();
+            Board index  = hash & ((1 << 20) - 1);
+            
+            Move tt_move = 0;
+            if (transposition_table[index].key == hash) {
+                tt_move = transposition_table[index].best_move;
+            }
+
+            score_moves(moves, tt_move, 0);
+
+            for (Square i = 0; i < moves.count; i++) {
+                pick_move(moves, i);
+                if (!pos.make_move(moves.moves[i])) continue;
+
+                // Root PV node search - we want the most accurate score here, so we search with a full window
+                short score = -search(pos, depth - 1, -beta, -alpha, 1);
+                pos.unmake_move(moves.moves[i]);
+
+                if (abort_search) return best_move_found;
+                if (score > best_score) {
+                    best_score = score;
+                    best_move_found = moves.moves[i];
+                }
+                if (score > alpha) {
+                    alpha = score;
+                }
+            }
+
+            out_score = best_score;
+
+            if (best_move_found != 0) {
+                transposition_table[index].key = hash;
+                transposition_table[index].best_move = best_move_found;
+                transposition_table[index].score = value_to_tt(best_score, 0);
+                transposition_table[index].depth = depth;
+                transposition_table[index].flag = EXACT;
+                transposition_table[index].phase = pos.get_phase();
+            }
+            return best_move_found;
+        }
+
+        /**
+         * @brief Core Alpha-Beta search updated with PVS, LMR, and Singular Extensions.
+         * @param depth Remaining search depth.
+         * @param alpha Lower bound score.
+         * @param beta Upper bound score.
+         * @param ply_from_root Distance from the root node.
+         * @param excluded_move Skip this move (used by Singular Extensions).
+         * @return The best score found in the sub-tree.
+         */
+        inline short search(Position& pos, short depth, short alpha, short beta, short ply_from_root, Move excluded_move = 0) noexcept {
+            if (ply_from_root >= Constants::MAX_DEPTH - 1) {
+                return pos.evaluate();
+            }
+            if (pos.get_game_ply() >= Constants::MAX_GAME_PLIES - 1) {
+                return pos.evaluate();
+            }
+            
+            // Check detection
+            bool in_check = pos.is_square_attacked(pos.get_king_square(pos.get_side_to_move()), Color(pos.get_side_to_move() ^ 1ULL));
+            
+            // Check extension: if we are under check, we extend the search by +1 ply
+            if (in_check) {
+                depth++;
+            } 
+
+            if (depth <= 0) return quiescence(pos, alpha, beta);
+
+            short temp = alpha;
+            Board hash = pos.get_hash();
+            Board index = hash & ((1 << 20) - 1);
+
+            Move tt_move = 0;
+            short tt_depth = 0;
+            if (transposition_table[index].key == hash) {
+                tt_move = transposition_table[index].best_move;
+                tt_depth = transposition_table[index].depth;
+                if (tt_depth >= depth && excluded_move == 0) {
+                    short tt_score = value_from_tt(transposition_table[index].score, ply_from_root);
+                    switch (transposition_table[index].flag) {
+                        case EXACT: return tt_score;
+                        case ALPHA: if (tt_score <= alpha) return tt_score; break;
+                        case BETA: if (tt_score >= beta) return tt_score; break;
+                    }
+                }
+            }
+
+            // Null Move Pruning
+            if (depth >= 3 && !in_check && ply_from_root > 0 && pos.get_phase() > 6 && excluded_move == 0) {
+                short static_eval = pos.evaluate();
+                if (static_eval >= beta) {
+                    pos.make_null_move();
+
+                    short null_score = -search(pos, depth - 3, -beta, -beta + 1, ply_from_root + 1);
+
+                    pos.unmake_null_move();
+
+                    if (abort_search) return 0;
+                    if (null_score >= beta) {
+                        return beta; // beta cutoff on null move, so we can skip searching this node further
+                    }
+                }
+            }
+
+            bool extended = false;
+            if (depth >= 6 && tt_move != 0 && excluded_move == 0 && tt_depth >= depth - 3) {
+                short tt_score = value_from_tt(transposition_table[index].score, ply_from_root);
+                if (std::abs(tt_score) < Constants::VALUE_MATE - 100) {
+                    short margin = 2 * depth; // Singular margin (~2 centipawns per depth)
+                    short singular_beta = tt_score - margin;
+                    
+                    // Exclude the best move and see if any other move can reach its level
+                    short singular_score = search(pos, depth - 3, singular_beta - 1, singular_beta, ply_from_root + 1, tt_move);
+                    
+                    if (singular_score < singular_beta) {
+                        extended = true; // This move is vastly superior to all others, extend search!
+                    }
+                }
+            }
+
+            MoveList moves = pos.generate_all_moves();
+            score_moves(moves, tt_move, ply_from_root);
+
+            short best_score = -Constants::VALUE_INFINITE;
+            Move best_move = 0;
+            short legal_moves = 0;
+
+            short next_depth = depth - 1 + (extended ? 1 : 0);
+
+            for (Square i = 0; i < moves.count; i++) {
+                pick_move(moves, i);
+                Move current_move = moves.moves[i];
+                
+                // Skip the excluded move when verifying singularity
+                if (current_move == excluded_move) continue;
+
+                if (!pos.make_move(current_move)) continue;
+                legal_moves++;
+
+                short score;
+                std::uint8_t flag = get_flag(current_move);
+                bool is_capture = (flag == CAPTURE || flag >= KNIGHT_PROMOTION_AND_CAPTURE);
+
+                if (legal_moves == 1) {
+                    // 1. PV node: Search with full window
+                    score = -search(pos, next_depth, -beta, -alpha, ply_from_root + 1);
+                } else {
+                    // 2. Non-PV nodes: Scout search with Null Window (PVS)
+                    short reduction = 0;
+
+                    // Late Move Reductions (LMR) integrated with PVS
+                    if (i >= 4 && depth >= 3 && !is_capture && !in_check) {
+                        reduction = 1;
+                        if (i >= 12) reduction = 2;    
+                    }
+
+                    score = -search(pos, std::max(0, next_depth - reduction), -alpha - 1, -alpha, ply_from_root + 1);
+
+                    // Re-search at full depth with null window if reduced seacrch fails high
+                    if (reduction > 0 && score > alpha) {
+                        score = -search(pos, next_depth, -alpha - 1, -alpha, ply_from_root + 1);
+                    }
+
+                    if (reduction > 0 && score > alpha) {
+                        score = -search(pos, next_depth, -beta, -alpha, ply_from_root + 1);
+                    }
+                }
+
+                pos.unmake_move(current_move);
+
+                if (abort_search) return 0;
+                check_time(pos);
+
+                if (score > best_score) {
+                    best_score = score;
+                    best_move = current_move;
+                }
+
+                if (score >= beta) {
+                    // Beta cutoff: update killer moves and history for quiet moves
+                    if (!is_capture && ply_from_root < Constants::MAX_DEPTH) {
+                        // Update killer moves
+                        if (killer_moves[ply_from_root][0] != current_move) {
+                            killer_moves[ply_from_root][1] = killer_moves[ply_from_root][0];
+                            killer_moves[ply_from_root][0] = current_move;
+                        }
+
+                        // Update history heuristic
+                        Square from = get_from(current_move);
+                        Square to = get_to(current_move);
+                        history[from][to] += depth * depth;
+                    }
+                    alpha = score;
+                    break;
+                }
+                if (score > alpha) alpha = score;
+            }
+            if (legal_moves == 0) {
+                if (excluded_move != 0) return alpha; // Excluded search, don't trigger mate
+                if (in_check) return -Constants::VALUE_MATE + ply_from_root; // Checkmate
+                return 0; // Stalemate
+            }
+
+            // Save search results to Transposition Table
+            if (excluded_move == 0) {
+                transposition_table[index].key = hash;
+                transposition_table[index].best_move = best_move;
+                transposition_table[index].score = value_to_tt(best_score, ply_from_root);
+                transposition_table[index].depth = depth;
+                transposition_table[index].flag = (best_score >= beta) ? BETA : ((best_score > temp) ? EXACT : ALPHA);
+                transposition_table[index].phase = pos.get_phase();
+            }
+
+            return best_score;
+        }
+
+         /**
+         * @brief Quiescence search extended to handle check evasions safely.
+         */
+        inline short quiescence(Position& pos, short alpha, short beta) {
+            if (pos.get_game_ply() >= Constants::MAX_GAME_PLIES - 1) {
+                return pos.evaluate();
+            }
+
+            bool in_check = pos.is_square_attacked(pos.get_king_square(pos.get_side_to_move()), Color(pos.get_side_to_move() ^ 1ULL));
+
+            // Stand pat: if not in check, establish a lower bound score
+            if (!in_check) {
+                short stand_pat = pos.evaluate();
+                if (stand_pat >= beta) return beta;
+                if (stand_pat > alpha) alpha = stand_pat;
+            }
+
+            // If in check: we generate ALL legal moves (to evade check).
+            // If not in check: we only generate captures to keep search quiet.
+            MoveList moves = in_check ? pos.generate_all_moves() : pos.generate_all_captures();
+            score_moves(moves, 0, 0); // Quick scoring
+
+            short legal_moves = 0;
+            for (Square i = 0; i < moves.count; i++) {
+                pick_move(moves, i);
+                if (!pos.make_move(moves.moves[i])) continue;
+                legal_moves++;
+
+                short score = -quiescence(pos, -beta, -alpha);
+                pos.unmake_move(moves.moves[i]);
+
+                if (score >= beta) return beta;
+                if (score > alpha) alpha = score;
+            }
+
+            // If we are under check but have no legal moves, it is checkmate
+            if (in_check && legal_moves == 0) {
+                return -Constants::VALUE_MATE + pos.get_game_ply();
+            }
+
+            return alpha;
+        }
+        /// @}
+
         /// @name Search Utilities
         /// @{
 
@@ -1227,7 +1444,7 @@ namespace MyChess {
 
                 // TT move gets highest priority
                 if (move == tt_move) {
-                    list.scores[i] = 30000;
+                    list.scores[i] = Constants::SCORE_TT;
                     continue;
                 }
 
@@ -1237,9 +1454,9 @@ namespace MyChess {
 
                 if (!is_capture) {
                     if (move == killer_moves[ply][0]) {
-                        list.scores[i] += 9000;
+                        list.scores[i] += Constants::SCORE_KILLER_1;
                     } else if (move == killer_moves[ply][1]) {
-                        list.scores[i] += 8000;
+                        list.scores[i] += Constants::SCORE_KILLER_2;
                     } else {
                         // History heuristic for quiet moves
                         Square from = get_from(move);
@@ -1273,28 +1490,16 @@ namespace MyChess {
          * @brief Interleaves time-checking logic to avoid heavy std::chrono calls on every node.
          * Checks the clock only once every 2048 nodes.
          */
-        inline void check_time() noexcept {
+        inline void check_time(const Position& pos) noexcept {
             nodes_visited++;
             if ((nodes_visited & 2047) == 0) {
                 if (std::chrono::steady_clock::now() >= end_time_limit) {
                     abort_search = true;
                 }
-                if (on_node_update) on_node_update(*this);
+                if (on_node_update) on_node_update(pos);
             }
         }
 
-        /// @}
-
-    public:
-        /// @name Accessors
-        /// @{
-
-        /// @brief Gets the piece located on the given square.
-        inline Piece get_piece(Square cell) const noexcept { return piece_on_square[cell]; }
-        
-        /// @brief Gets the color of the side currently to move.
-        inline Color get_side_to_move() const noexcept { return side_to_move; }
-    
         /// @}
     };
 }

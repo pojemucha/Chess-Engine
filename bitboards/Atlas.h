@@ -71,7 +71,18 @@ namespace MyChess {
         PIECE_NB, EMPTY
     };
 
-    constexpr Square CELL_NB = 64U;
+    /// @brief Standard chessboard squares indexed from 0 (A1) to 63 (H8).
+    enum Cell : Square {
+        A1, B1, C1, D1, E1, F1, G1, H1,
+        A2, B2, C2, D2, E2, F2, G2, H2,
+        A3, B3, C3, D3, E3, F3, G3, H3,
+        A4, B4, C4, D4, E4, F4, G4, H4,
+        A5, B5, C5, D5, E5, F5, G5, H5,
+        A6, B6, C6, D6, E6, F6, G6, H6,
+        A7, B7, C7, D7, E7, F7, G7, H7,
+        A8, B8, C8, D8, E8, F8, G8, H8,
+        CELL_NB
+    };
     
     /**
      * @struct Atlas
@@ -97,7 +108,7 @@ namespace MyChess {
         // Zobrist hashing keys
         Board z_pieces[PIECE_NB][CELL_NB]; ///< Keys for piece/square combinations 
         Board z_side;                      ///< Key to toggle the active side to move  
-        Board z_castling[16];              ///< Keys for all 16 castling rights states (4 bits: KQkq)
+        Board z_castling[32];              ///< Keys for all 16 castling rights states (increased from 16 to prevent OOB)
         Board z_ep[8];                     ///< Keys for en passant files (A to H)
         
         /**
@@ -110,11 +121,9 @@ namespace MyChess {
             constexpr Board not_gh_file   = 0x3F3F3F3F3F3F3F3FULL;
             for (Square cell = 0; cell < CELL_NB; cell++) {
                 // WHITE PAWN ATTACKS
-                pawn_attacks[WHITE][cell] |= ((1ULL << cell) << 9) & not_a_file; // 1 RIGHT, 1 UP
-                pawn_attacks[WHITE][cell] |= ((1ULL << cell) << 7) & not_h_file; // 1 LEFT, 1 UP
+                pawn_attacks[WHITE][cell] = (((1ULL << cell) & not_h_file) << 9) | (((1ULL << cell) & not_a_file) << 7);
                 // BLACK PAWN ATTACKS
-                pawn_attacks[BLACK][cell] |= ((1ULL << cell) >> 7) & not_a_file; // 1 RIGHT, 1 DOWN
-                pawn_attacks[BLACK][cell] |= ((1ULL << cell) >> 9) & not_h_file; // 1 LEFT, 1 DOWN
+                pawn_attacks[BLACK][cell] = (((1ULL << cell) & not_h_file) >> 7) | (((1ULL << cell) & not_a_file) >> 9);
                 // KNIGHT ATTACKS
                 knight_attacks[cell] |= ((1ULL << cell) << 17) & not_a_file;     // 1 RIGHT, 2 UP
                 knight_attacks[cell] |= ((1ULL << cell) << 15) & not_h_file;     // 1 LEFT, 2 UP
@@ -301,7 +310,7 @@ namespace MyChess {
                 for (short j = 0; j < CELL_NB; j++)
                     z_pieces[i][j] = Math::next_random(seed);
             z_side = Math::next_random(seed);
-            for (Square i = 0; i < 16; i++) z_castling[i] = Math::next_random(seed);
+            for (Square i = 0; i < 32; i++) z_castling[i] = Math::next_random(seed);
             for (Square i = 0; i < 8; i++) z_ep[i] = Math::next_random(seed);
         } 
     };
