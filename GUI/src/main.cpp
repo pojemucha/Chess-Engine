@@ -867,6 +867,8 @@ int main() {
     Position board("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
     Position visual_engine_board;
 
+    Search engine_search;
+
     bool human_is_white = true;
     std::atomic<bool> engine_thinking = false;
     std::mutex engine_mutex;
@@ -965,7 +967,6 @@ int main() {
         if (engine_thread && engine_thread->joinable()) engine_thread->join();
 
         engine_thread = std::make_unique<std::thread>([&, search_board = board]() mutable {
-            Search engine_search;
             
             engine_search.on_node_update = [&](const Position& p) {
                 if (settings.show_analysis) {

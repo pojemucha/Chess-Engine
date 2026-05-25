@@ -31,9 +31,9 @@ namespace MyChess {
         constexpr short VALUE_INFINITE = 32767; ///< Infinite evaluation score
         constexpr short VALUE_MATE = 32000;     ///< Score threshold for checkmate (used to detect mate in N)
 
-        constexpr short SCORE_TT = 30000;       ///< Bonus for moves found in the Transposition Table
-        constexpr short SCORE_KILLER_1 = 9000;  ///< Bonus for 1st killer move
-        constexpr short SCORE_KILLER_2 = 8000;  ///< Bonus for 2nd Killer move
+        constexpr int SCORE_TT = 5000000;       ///< Bonus for moves found in the Transposition Table
+        constexpr int SCORE_KILLER_1 = 900000;  ///< Bonus for 1st killer move
+        constexpr int SCORE_KILLER_2 = 800000;  ///< Bonus for 2nd Killer move
 
         constexpr size_t TT_SIZE = 1 << 20;     ///< ~1 Million entries (~24MB) for the Transposition Table
     }
@@ -125,13 +125,13 @@ namespace MyChess {
      */
     struct MoveList {
         Move moves[256];   ///< Maximum possible theoretical moves in chess is 218, but we allocate 256 for safety and alignment.
-        short scores[256]; ///< Heuristic scores for move ordering (e.g., MVV/LVA, killer moves, history heuristic).
+        int scores[256];   ///< Heuristic scores for move ordering (e.g., MVV/LVA, killer moves, history heuristic).
         Square count = 0;
 
         /**
          * @brief Appends a new move to the list.
          */
-        void add(const Move move, const short move_score) {
+        void add(const Move move, const int move_score) {
             if (count < 256) {
                 scores[count] = move_score;
                 moves[count++] = move;
@@ -145,8 +145,8 @@ namespace MyChess {
      */
     struct TTEntry {
         Board key;          ///< Zobrist hash key to handle collisions
-        Move best_move;     ///< Best move found in this position
-        short score;        ///< Evaluated score for the position (from the perspective of the side to move)
+        Move  best_move;    ///< Best move found in this position
+        int   score;        ///< Evaluated score for the position (from the perspective of the side to move)
         short depth;        ///< Search depth at which the score was computed
         std::uint8_t flag;  ///< TT_flags (EXACT, ALPHA, or BETA)
         short phase;        ///< Game phase for evaluation scaling (0-24)
@@ -494,7 +494,7 @@ namespace MyChess {
                             Piece to_piece   = piece_on_square[(en_passant_square ^ 8)];
                             short victim_value   = std::abs(weight[to_piece]);
                             short attacker_value = std::abs(weight[from_piece]);
-                            short move_score     = (victim_value * 10) - (attacker_value / 10);
+                            short move_score     = 10000 + victim_value * 10 - attacker_value / 10;
                             list.add(encode_move(from, en_passant_square, EN_PASSANT), move_score);
                         }
                     }
@@ -1159,6 +1159,14 @@ namespace MyChess {
             return pv;
         }
 
+        /**
+         * @brief Immediately halts the ongoing search. 
+         * Essential for the UCI "stop" command and exact time management.
+         */
+        void stop() noexcept {
+            abort_search = true;
+        }
+
     private:
         /// @name Search Algorithms
         /// @{
@@ -1326,12 +1334,12 @@ namespace MyChess {
 
                     score = -search(pos, std::max(0, next_depth - reduction), -alpha - 1, -alpha, ply_from_root + 1);
 
-                    // Re-search at full depth with null window if reduced seacrch fails high
+                    // Re-search at full depth with null window if reduced search fails high
                     if (reduction > 0 && score > alpha) {
                         score = -search(pos, next_depth, -alpha - 1, -alpha, ply_from_root + 1);
                     }
 
-                    if (reduction > 0 && score > alpha) {
+                    if (score > alpha && score < beta) {
                         score = -search(pos, next_depth, -beta, -alpha, ply_from_root + 1);
                     }
                 }
@@ -1450,7 +1458,7 @@ namespace MyChess {
 
                 // Killer moves get high priority (only for non-captures)
                 std::uint8_t flag = get_flag(move);
-                bool is_capture = (flag == CAPTURE || flag >= KNIGHT_PROMOTION_AND_CAPTURE);
+                bool is_capture = (flag == CAPTURE || flag == EN_PASSANT || flag >= KNIGHT_PROMOTION_AND_CAPTURE);
 
                 if (!is_capture) {
                     if (move == killer_moves[ply][0]) {

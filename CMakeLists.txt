@@ -6,6 +6,15 @@ project(MyChess)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+add_executable(MyChess_UCI UCI/uci_main.cpp)
+
+find_package(Threads REQUIRED)
+target_link_libraries(MyChess_UCI PRIVATE Threads::Threads)
+target_include_directories(MyChess_UCI PRIVATE
+    bitboards
+    data
+)
+
 include(fetchcontent)
 
 set(SFML_BUILD_DOC OFF CACHE BOOL "Don't build SFML documentation" FORCE)
@@ -21,21 +30,16 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(SFML)
 
-set(SOURCES 
-    GUI/src/main.cpp
-)
+add_executable(MyChess_GUI GUI/src/main.cpp)
 
-add_executable(${PROJECT_NAME} ${SOURCES})
-
-target_link_libraries(${PROJECT_NAME} PRIVATE
+target_link_libraries(MyChess_GUI PRIVATE
     SFML::Graphics
     SFML::Window
     SFML::System
     SFML::Audio
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(MyChess_GUI PRIVATE
     bitboards
     data
-    GUI/include
 )
