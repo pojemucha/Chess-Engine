@@ -105,6 +105,8 @@ namespace MyChess {
         Board king_attacks[CELL_NB];
 
     public:
+        Board pawn_passed_masks[COLOR_NB][CELL_NB];
+        
         // Zobrist hashing keys
         Board z_pieces[PIECE_NB][CELL_NB]; ///< Keys for piece/square combinations 
         Board z_side;                      ///< Key to toggle the active side to move  
@@ -114,7 +116,7 @@ namespace MyChess {
         /**
          * @brief Initializes all attack tables and Zobrist keys at compile-time.
          */
-        inline constexpr Atlas() noexcept : pawn_attacks{}, knight_attacks{}, bishop_attacks{}, rook_attacks{}, king_attacks{}, bishop_occupancy_masks{}, rook_occupancy_masks{}, bishop_shifts{}, rook_shifts{}, z_pieces{}, z_side{}, z_castling{}, z_ep{} {
+        inline constexpr Atlas() noexcept : pawn_attacks{}, knight_attacks{}, bishop_attacks{}, rook_attacks{}, king_attacks{}, bishop_occupancy_masks{}, rook_occupancy_masks{}, bishop_shifts{}, rook_shifts{}, z_pieces{}, z_side{}, z_castling{}, z_ep{}, pawn_passed_masks{} {
             constexpr Board not_a_file    = 0xFEFEFEFEFEFEFEFEULL;
             constexpr Board not_h_file    = 0x7F7F7F7F7F7F7F7FULL;
             constexpr Board not_ab_file   = 0xFCFCFCFCFCFCFCFCULL;
@@ -188,6 +190,22 @@ namespace MyChess {
                     bishop_attacks[cell][index] = slow_bishop_attacks(cell, subset);
                     subset = (subset - bishop_occupancy_masks[cell]) & bishop_occupancy_masks[cell];
                 } while (subset != 0);
+                // PRECOMPUTED PASSED PAWN MASKS
+                //PASSED WHITE PAWN
+                pawn_passed_masks[WHITE][cell] = 0ULL;
+                for (int rank_idx = rank + 1; rank_idx < 8; rank_idx++) {
+                    pawn_passed_masks[WHITE][cell] |= (1ULL << (rank_idx * 8 + file));
+                    if (file > 0) pawn_passed_masks[WHITE][cell] |= (1ULL << (rank_idx * 8 + file - 1));
+                    if (file < 7) pawn_passed_masks[WHITE][cell] |= (1ULL << (rank_idx * 8 + file + 1));
+                }
+
+                //PASSED BLACK PAWN
+                pawn_passed_masks[BLACK][cell] = 0ULL;
+                for (int rank_idx = rank - 1; rank_idx >= 0; rank_idx--) {
+                    pawn_passed_masks[BLACK][cell] |= (1ULL << (rank_idx * 8 + file));
+                    if (file > 0) pawn_passed_masks[BLACK][cell] |= (1ULL << (rank_idx * 8 + file - 1));
+                    if (file < 7) pawn_passed_masks[BLACK][cell] |= (1ULL << (rank_idx * 8 + file + 1));
+                }
             }
             generate_Zobrist_hash();
         }

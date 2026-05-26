@@ -15,6 +15,7 @@
 #include <memory>
 #include <chrono>
 #include <algorithm>
+#include <cctype>
 
 #include "Position.h"
 #include "WeightsIO.h"
@@ -35,11 +36,16 @@ std::unique_ptr<std::thread> search_thread = nullptr;
 Move parse_uci_move(Position& pos, const std::string& token) {
     if (token.length() < 4) return 0;
 
+    auto valid_sq = [](int file, int rank) {
+        return file >= 0 && file < 8 && rank >= 0 && rank < 8;
+    };
+
     MoveList moves = pos.generate_all_moves();
     int from_file = token[0] - 'a';
     int from_rank = token[1] - '1';
     int to_file   = token[2] - 'a';
     int to_rank   = token[3] - '1';
+    if (!valid_sq(from_file, from_rank) || !valid_sq(to_file, to_rank)) return 0;
 
     Square from = from_rank * 8 + from_file;
     Square to   = to_rank * 8 + to_file;
@@ -95,17 +101,35 @@ std::string format_uci_move(Move move) {
     return result;
 }
 
+std::string format_score(short score) {
+    if (score > 31000) {
+        int mate_in = (32000 - score + 1) / 2;
+        return "mate " + std::to_string(mate_in);
+    } else if (score < -31000) {
+        int mate_in = (32000 - std::abs(score) + 1) / 2;
+        return "mate -" + std::to_string(mate_in);
+    }
+    return "cp " + std::to_string(score);
+}
+
 /**
  * @brief Thread worker that executes the search.
  * Runs in the background so the main thread can continue parsing "stop" or "quit" commands.
  */
-void search_worker(int time_ms) {
-    short out_score = 0;
-    
-    // Start Alpha-Beta iterative deepening
-    Move best_move = engine_search.get_best_move(engine_pos, std::chrono::milliseconds(time_ms), -32000, 32000, out_score);
-
-    // The UCI protocol strictly requires the "bestmove" string to conclude the search
+void search_worker(int time_ms, short target_depth, long long target_nodes) {
+    short out_score = 0;    
+    engine_search.on_iteration_end = [](short d, short score, long long n, long long t, const std::vector<Move>& pv) {
+        std::cout << "info depth " << d 
+                  << " score " << format_score(score) 
+                  << " nodes " << n 
+                  << " time " << t 
+                  << " pv";
+        for (Move m : pv) {
+            std::cout << " " << format_uci_move(m);
+        }
+        std::cout << std::endl;
+    };
+    Move best_move = engine_search.get_best_move(engine_pos, time_ms, target_depth, target_nodes, -32000, 32000, out_score);
     std::cout << "bestmove " << format_uci_move(best_move) << std::endl;
 }
 
@@ -128,6 +152,18 @@ int calculate_time(Color side, int wtime, int btime, int winc, int binc, int mov
     if (time_for_move < 50) time_for_move = 50; // Minimum 50ms to guarantee at least depth 1
 
     return time_for_move;
+}
+
+uint64_t perft(Position& pos, int depth) {
+    if (depth == 0) return 1ULL;
+    MoveList list = pos.generate_all_moves();
+    uint64_t nodes = 0;
+    for (int i = 0; i < list.count; i++) {
+        if (!pos.make_move(list.moves[i])) continue;
+        nodes += perft(pos, depth - 1);
+        pos.unmake_move(list.moves[i]);
+    }
+    return nodes;
 }
 
 int main() {
@@ -164,30 +200,34 @@ int main() {
             if (mode == "startpos") {
                 engine_pos.parse_FEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
             } else if (mode == "fen") {
-                std::string fen = "", fen_part;
-                for (int i = 0; i < 6; i++) {
-                    if (iss >> fen_part) fen += fen_part + " ";
+                std::string fen_part = "";
+                std::string t;
+                for (int i = 0; i < 6 && (iss >> t) && t != "moves"; i++) {
+                    fen_part += t + " ";
                 }
-                engine_pos.parse_FEN(fen);
+                engine_pos.parse_FEN(fen_part);
             }
-
-            // Apply previously played moves to update the board state
-            std::string moves_token;
-            if (iss >> moves_token && moves_token == "moves") {
-                std::string move_str;
-                while (iss >> move_str) {
-                    Move m = parse_uci_move(engine_pos, move_str);
-                    if (m != 0) {
-                        engine_pos.make_move(m);
+            
+            std::string temp;
+            while (iss >> temp) {
+                if (temp == "moves") {
+                    while (iss >> temp) {
+                        Move m = parse_uci_move(engine_pos, temp);
+                        if (m != 0) engine_pos.make_move(m);
                     }
+                    break;
                 }
             }
+            continue;
         }
         else if (token == "go") {
             int wtime = -1, btime = -1, winc = 0, binc = 0, movestogo = 40;
             int movetime = -1;
-            std::string param;
+            short depth = -1;
+            long long nodes = -1;
+            bool infinite = false;
 
+            std::string param;
             while (iss >> param) {
                 if (param == "wtime") iss >> wtime;
                 else if (param == "btime") iss >> btime;
@@ -195,13 +235,18 @@ int main() {
                 else if (param == "binc") iss >> binc;
                 else if (param == "movestogo") iss >> movestogo;
                 else if (param == "movetime") iss >> movetime;
+                else if (param == "depth") iss >> depth;
+                else if (param == "nodes") iss >> nodes;
+                else if (param == "infinite") infinite = true;
             }
 
-            int time_for_move = 3000; // Default to 3 seconds
+            int time_for_move = -1; 
             if (movetime != -1) {
                 time_for_move = movetime; // GUI forced an exact time limit
             } else if (wtime != -1 || btime != -1) {
                 time_for_move = calculate_time(engine_pos.get_side_to_move(), wtime, btime, winc, binc, movestogo);
+            } else if (!infinite && depth == -1 && nodes == -1) {
+                time_for_move = 3000;
             }
 
             // Clean up the previous search thread if it exists
@@ -211,7 +256,7 @@ int main() {
             }
 
             // Launch the search asynchronously
-            search_thread = std::make_unique<std::thread>(search_worker, time_for_move);
+            search_thread = std::make_unique<std::thread>(search_worker, time_for_move, depth, nodes);
         }
         else if (token == "stop") {
             engine_search.stop();
@@ -225,6 +270,15 @@ int main() {
                 search_thread->join();
             }
             break;
+        }
+        else if (token == "perft") {
+            int d;
+            iss >> d;
+            auto start = std::chrono::steady_clock::now();
+            uint64_t nodes = perft(engine_pos, d);
+            auto end = std::chrono::steady_clock::now();
+            auto diff = std::chrono::duration_cast<std::chrono::milliseconds>(end - start).count();
+            std::cout << "Nodes: " << nodes << " Time: " << diff << "ms" << std::endl;
         }
     }
     

@@ -43,3 +43,18 @@ target_include_directories(MyChess_GUI PRIVATE
     bitboards
     data
 )
+
+if(MINGW)
+    target_link_options(MyChess_GUI PRIVATE -static-libgcc -static-libstdc++ -static)
+    target_link_options(MyChess_UCI PRIVATE -static-libgcc -static-libstdc++ -static)
+endif()
+
+if(NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Choose the type of build." FORCE)
+endif()
+
+if(MSVC)
+    add_compile_options(/O2 /Oi /Ot /GL)
+else()
+    add_compile_options(-O3 -march=native -flto)
+endif()

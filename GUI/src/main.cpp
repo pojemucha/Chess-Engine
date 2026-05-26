@@ -44,10 +44,10 @@ struct SpriteCache {
     
     bool load_piece_sprites() {
         const char* piece_files[] = {
-            "GUI/assets/sprites/wP.png", "GUI/assets/sprites/wN.png", "GUI/assets/sprites/wB.png",
-            "GUI/assets/sprites/wR.png", "GUI/assets/sprites/wQ.png", "GUI/assets/sprites/wK.png",
-            "GUI/assets/sprites/bP.png", "GUI/assets/sprites/bN.png", "GUI/assets/sprites/bB.png",
-            "GUI/assets/sprites/bR.png", "GUI/assets/sprites/bQ.png", "GUI/assets/sprites/bK.png"
+            "../GUI/assets/sprites/wP.png", "../GUI/assets/sprites/wN.png", "../GUI/assets/sprites/wB.png",
+            "../GUI/assets/sprites/wR.png", "../GUI/assets/sprites/wQ.png", "../GUI/assets/sprites/wK.png",
+            "../GUI/assets/sprites/bP.png", "../GUI/assets/sprites/bN.png", "../GUI/assets/sprites/bB.png",
+            "../GUI/assets/sprites/bR.png", "../GUI/assets/sprites/bQ.png", "../GUI/assets/sprites/bK.png"
         };
         for (const auto* file : piece_files) {
             sf::Texture tex;
@@ -62,10 +62,10 @@ struct SpriteCache {
     
     sf::Texture* get_piece_texture(Piece piece) {
         const char* piece_to_file[] = {
-            "GUI/assets/sprites/wP.png", "GUI/assets/sprites/wN.png", "GUI/assets/sprites/wB.png",
-            "GUI/assets/sprites/wR.png", "GUI/assets/sprites/wQ.png", "GUI/assets/sprites/wK.png",
-            "GUI/assets/sprites/bP.png", "GUI/assets/sprites/bN.png", "GUI/assets/sprites/bB.png",
-            "GUI/assets/sprites/bR.png", "GUI/assets/sprites/bQ.png", "GUI/assets/sprites/bK.png"
+            "../GUI/assets/sprites/wP.png", "../GUI/assets/sprites/wN.png", "../GUI/assets/sprites/wB.png",
+            "../GUI/assets/sprites/wR.png", "../GUI/assets/sprites/wQ.png", "../GUI/assets/sprites/wK.png",
+            "../GUI/assets/sprites/bP.png", "../GUI/assets/sprites/bN.png", "../GUI/assets/sprites/bB.png",
+            "../GUI/assets/sprites/bR.png", "../GUI/assets/sprites/bQ.png", "../GUI/assets/sprites/bK.png"
         };
         if (piece >= EMPTY) return nullptr;
         auto it = textures.find(piece_to_file[piece]);
@@ -111,17 +111,13 @@ struct UIState {
 
 struct GameSettings {
     int search_time_ms = 3000;
-
     short alpha = -32000;
     short beta  = 32000;
-
     int train_iterations = 100;
     float train_lr = 1000.0f; 
-
     bool show_analysis = true;
     bool show_best_move = true;
     bool show_legal_moves = true;
-
     bool auto_save_weights = true;
     
     void save_to_file(const std::string& filename) {
@@ -630,15 +626,7 @@ void draw_last_move_highlight(sf::RenderWindow& window, int from, int to, float 
 
 void draw_check_highlight(sf::RenderWindow& window, Position& pos, float board_offset_x = 0.0f) {
     Color side = pos.get_side_to_move();
-    Piece king_piece = (side == WHITE) ? WHITE_KING : BLACK_KING;
-
-    Square king_sq = 64;
-    for (int sq = 0; sq < 64; sq++) {
-        if (pos.get_piece(sq) == king_piece) {
-            king_sq = sq;
-            break;
-        }
-    }
+    Square king_sq = pos.get_king_square(side);
 
     if (king_sq < 64) {
         Color enemy = (side == WHITE) ? BLACK : WHITE;
@@ -807,16 +795,7 @@ std::string check_game_over(Position& pos) {
     if (legal_moves == 0) {
         Color side = pos.get_side_to_move();
         Color enemy = (side == WHITE) ? BLACK : WHITE;
-
-        Square king_sq = 0;
-        Piece king_piece = (side == WHITE) ? WHITE_KING : BLACK_KING;
-
-        for (int sq = 0; sq < 64; sq++) {
-            if (pos.get_piece(sq) == king_piece) {
-                king_sq = sq;
-                break;
-            }
-        }
+        Square king_sq = pos.get_king_square(side);
 
         bool in_check = pos.is_square_attacked(king_sq, enemy);
 
@@ -848,7 +827,7 @@ int main() {
     window.setFramerateLimit(60);
 
     sf::Font font;
-    if (!font.openFromFile("GUI/assets/fonts/Roboto-Regular.ttf")) {
+    if (!font.openFromFile("../GUI/assets/fonts/Roboto-Regular.ttf")) {
         std::cout << "Could not load font" << std::endl;
         return -1;
     }
@@ -978,7 +957,7 @@ int main() {
             short best_score = 0;
             Move best_move = 0;
             try {
-                best_move = engine_search.get_best_move(search_board, std::chrono::milliseconds(settings.search_time_ms), settings.alpha, settings.beta, best_score);
+                best_move = engine_search.get_best_move(search_board, settings.search_time_ms, -1, -1, settings.alpha, settings.beta, best_score);
             } catch (...) { std::cout << "Engine error" << std::endl; }
 
             std::vector<Move> pv = engine_search.get_PV(search_board, 4);
@@ -988,6 +967,7 @@ int main() {
             Color original_side = search_board.get_side_to_move();
 
             if (best_move != 0) {
+                std::lock_guard<std::mutex> lock(engine_mutex); 
                 if (board.make_move(best_move)) {
                     std::string eval_str = get_eval_string(board);
                     ui.move_history.push_back(move_to_string(best_move) + " (" + eval_str + ")");
@@ -1002,7 +982,7 @@ int main() {
                     }
                 } else {
                     std::cerr << "[ERROR] Engine generated an illegal move: " 
-                              << move_to_string(best_move) << std::endl;
+                            << move_to_string(best_move) << std::endl;
                     engine_thinking = false;
                     return;
                 }
@@ -1114,9 +1094,10 @@ int main() {
                 else if (game_state == GameState::FEN_INPUT) {
                     fen_input.active = fen_input.box.getGlobalBounds().contains(mouse);
                     if (btn_apply_fen.contains(mouse) && !fen_input.value.empty()) {
-                        board.parse_FEN(fen_input.value);
-                        ui.move_history.clear(); ui.best_move_sequence.clear(); ui.eval_score = 0; ui.selected_square = -1; game_state = GameState::PLAYING;
-                        if (!human_is_white) start_engine();
+                        if (board.parse_FEN(fen_input.value)) { 
+                            ui.move_history.clear(); ui.best_move_sequence.clear(); ui.eval_score = 0; ui.selected_square = -1; game_state = GameState::PLAYING;
+                            if (!human_is_white) start_engine();
+                        }
                     }
                     if (btn_back.contains(mouse)) game_state = GameState::MENU;
                 }
