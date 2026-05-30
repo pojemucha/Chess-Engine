@@ -39,6 +39,11 @@ const sf::Color BUTTON_ACTIVE(100, 180, 255);
 const sf::Color TEXT_COLOR  (230, 230, 230);
 const sf::Color ACCENT_COLOR(100, 180, 255);
 
+/**
+ * @struct SpriteCache
+ * @brief Resource manager for caching piece textures.
+ * Prevents redundant disk I/O by loading piece sprites into memory once at startup.
+ */
 struct SpriteCache {
     std::map<std::string, sf::Texture> textures;
     
@@ -73,26 +78,34 @@ struct SpriteCache {
     }
 };
 
+/**
+ * @enum GameState
+ * @brief Represents the overarching state machine of the application's UI.
+ */
 enum class GameState {
-    MENU,
-    SIDE_SELECT,
-    SETTINGS,
-    FEN_INPUT,
-    PLAYING,
-    PROMOTION_DIALOG
+    MENU,             ///< Main menu screen
+    SIDE_SELECT,      ///< Player color selection screen
+    SETTINGS,         ///< Configuration and engine tuning screen
+    FEN_INPUT,        ///< Custom board setup via FEN string
+    PLAYING,          ///< Active gameplay screen
+    PROMOTION_DIALOG  ///< Overlay prompt for pawn promotion selection
 };
 
+/**
+ * @struct UIState
+ * @brief Encapsulates volatile state variables related to the graphical chessboard rendering.
+ */
 struct UIState {
-    bool sidebar_open = false;
-    float board_offset_x = 200.0f;  
-    float target_offset_x = 200.0f;
-    int selected_square = -1;
-    std::vector<int> legal_moves_from_selection;
-    std::vector<std::string> move_history;
-    std::vector<std::string> best_move_sequence;
-    std::string game_status = "";
-    bool game_over = false;
-    short eval_score = 0;
+    bool sidebar_open = false;                       ///< Whether the control sidebar is currently expanded.
+    float board_offset_x = 200.0f;                   ///< Used for smooth sliding animations of the board.  
+    float target_offset_x = 200.0f;                  ///< Used for smooth sliding animations of the board.
+    int selected_square = -1;                        ///< Currently clicked square index (-1 if none).
+    std::vector<int> legal_moves_from_selection;     ///< Legal destination squares for the selected piece.
+    std::vector<std::string> move_history;           ///< Chronological list of moves played.
+    std::vector<std::string> best_move_sequence;     ///< Current Principal Variation (PV) from the engine.
+    std::string game_status = "";                    ///< End of game text (e.g., "Checkmate!").
+    bool game_over = false;                          ///< Flag indicating the game has concluded.
+    short eval_score = 0;                            ///< Current engine evaluation in centipawns.
 
     int promotion_from = -1;
     int promotion_to = -1;
@@ -109,6 +122,11 @@ struct UIState {
     sf::Clock anim_clock;
 };
 
+/**
+ * @struct GameSettings
+ * @brief Holds user-configurable parameters for the engine and GUI.
+ * Serialized to and from 'game_settings.json'.
+ */
 struct GameSettings {
     int search_time_ms = 3000;
     short alpha = -32000;
@@ -171,6 +189,10 @@ struct GameSettings {
     }
 };
 
+/**
+ * @struct Button
+ * @brief A generic clickable UI button with hover and active states.
+ */
 struct Button {
     sf::RectangleShape shape;
     sf::Text text;
@@ -207,6 +229,10 @@ Button create_button(const sf::Font& font, const std::string& label, float x, fl
     return button;
 }
 
+/**
+ * @struct Toggle
+ * @brief A UI checkbox component bound directly to a boolean pointer.
+ */
 struct Toggle {
     sf::RectangleShape box;
     sf::Text text;
@@ -245,6 +271,10 @@ Toggle create_toggle(const sf::Font& font, const std::string& label, float x, fl
     return t;
 }
 
+/**
+ * @struct Slider
+ * @brief A horizontal UI slider component bound to an integer value.
+ */
 struct Slider {
     sf::RectangleShape bg;
     sf::RectangleShape fill;
@@ -600,6 +630,12 @@ void draw_board(sf::RenderWindow& window, float board_offset_x = 0.0f) {
     }
 }
 
+/**
+ * @brief Translates an internal square index (0-63) to GUI screen coordinates.
+ * @param square The 0-63 square index (A1 = 0, H8 = 63).
+ * @param board_offset_x The current horizontal offset of the board.
+ * @return The 2D screen coordinates of the top-left corner of the square.
+ */
 sf::Vector2i square_to_screen(int square, float board_offset_x = 0.0f) {
     int rank = 7 - square / 8;
     int file = square % 8;
@@ -658,6 +694,12 @@ void draw_pieces(sf::RenderWindow& window, const Position& pos, SpriteCache& spr
     }
 }
 
+/**
+ * @brief Extracts all legal destination squares for a piece at a given origin square.
+ * @param pos The current board position.
+ * @param square The origin square index to query.
+ * @return A vector of legal destination square indices.
+ */
 std::vector<int> get_legal_moves_from_square(Position& pos, int square) {
     std::vector<int> legal_moves;
     if (square < 0 || square > 63) return legal_moves;
@@ -839,6 +881,7 @@ int main() {
         WeightsIO::reset_to_defaults();
         WeightsIO::save_weights("trained_weights.bin");
     }
+    sync_weights();
 
     GameSettings settings;
     settings.load_from_file("game_settings.json");

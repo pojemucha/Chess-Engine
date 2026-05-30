@@ -28,10 +28,11 @@ Search engine_search;
 std::unique_ptr<std::thread> search_thread = nullptr;
 
 /**
- * @brief Converts a UCI coordinate string (e.g., "e2e4", "e7e8q") into the engine's 16-bit Move format.
+ * @brief Parses a standard algebraic notation (SAN/UCI) move string into the engine's internal Move format.
+ * Validates the move against the current pseudo-legal move list to ensure legality.
  * @param pos The current board position.
- * @param token The UCI move string.
- * @return The encoded Move, or 0 if the move is invalid/illegal.
+ * @param token The UCI move string (e.g., "e2e4", "e7e8q").
+ * @return The encoded 16-bit internal Move, or 0 if the move is invalid or illegal.
  */
 Move parse_uci_move(Position& pos, const std::string& token) {
     if (token.length() < 4) return 0;
@@ -77,7 +78,9 @@ Move parse_uci_move(Position& pos, const std::string& token) {
 }
 
 /**
- * @brief Formats a 16-bit engine move back into a standard UCI string.
+ * @brief Formats an internal 16-bit encoded move into a standard UCI string.
+ * @param move The engine's internal move representation.
+ * @return The standard UCI string representation (e.g., "e2e4", "e7e8q").
  */
 std::string format_uci_move(Move move) {
     if (move == 0) return "0000"; // Null move (game over)
@@ -101,6 +104,12 @@ std::string format_uci_move(Move move) {
     return result;
 }
 
+/**
+ * @brief Converts the engine's internal evaluation score into a UCI-compliant string.
+ * Correctly formats forced mates as "mate N" and standard evaluations as "cp N".
+ * @param score The evaluation score from the perspective of the side to move.
+ * @return A UCI-formatted score string.
+ */
 std::string format_score(short score) {
     if (score > 31000) {
         int mate_in = (32000 - score + 1) / 2;
@@ -134,7 +143,15 @@ void search_worker(int time_ms, short target_depth, long long target_nodes) {
 }
 
 /**
- * @brief Calculates the time allocated for the current move.
+ * @brief Calculates optimal search time allocation for the current move based on game clock parameters.
+ * Assumes a default of 40 moves to go if not specified by the GUI.
+ * @param side The color to move.
+ * @param wtime Remaining time for White in milliseconds.
+ * @param btime Remaining time for Black in milliseconds.
+ * @param winc Time increment per move for White.
+ * @param binc Time increment per move for Black.
+ * @param movestogo Moves until the next time control (if applicable).
+ * @return The allocated thinking time in milliseconds.
  */
 int calculate_time(Color side, int wtime, int btime, int winc, int binc, int movestogo) {
     int time_left = (side == WHITE) ? wtime : btime;
@@ -154,6 +171,13 @@ int calculate_time(Color side, int wtime, int btime, int winc, int binc, int mov
     return time_for_move;
 }
 
+/**
+ * @brief Recursively traverses the move generation tree to verify node counts.
+ * Used strictly for debugging and verifying the accuracy of the move generator.
+ * @param pos The current position.
+ * @param depth The depth to search.
+ * @return The total number of leaf nodes at the specified depth.
+ */
 uint64_t perft(Position& pos, int depth) {
     if (depth == 0) return 1ULL;
     MoveList list = pos.generate_all_moves();
@@ -175,6 +199,7 @@ int main() {
     if (!WeightsIO::load_weights("trained_weights.bin")) {
         WeightsIO::reset_to_defaults();
     }
+    sync_weights();
 
     std::string line;
     while (std::getline(std::cin, line)) {

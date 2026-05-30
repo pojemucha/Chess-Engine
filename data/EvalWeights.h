@@ -132,4 +132,18 @@ namespace MyChess {
   inline double weight[12] = {100, 320, 330, 500, 900, 0, -100, -320, -330, -500, -900, 0};
   inline double PST_Midgame[12][64];
   inline double PST_Endgame[12][64];
+
+  inline int int_weight[12];
+  inline int int_PST_Midgame[12][64];
+  inline int int_PST_Endgame[12][64];
+
+  inline void sync_weights() {
+    for (int i = 0; i < 12; i++) {
+      int_weight[i] = static_cast<int>(weight[i]);
+      for (int j = 0; j < 64; j++) {
+        int_PST_Midgame[i][j] = static_cast<int>(PST_Midgame[i][j]);
+        int_PST_Endgame[i][j] = static_cast<int>(PST_Endgame[i][j]);
+      }
+    }
+  }
 }
